@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import ExceptionRecord, LeaseRecord, get_session, init_db
 from graph import run_extraction
+from qa import answer_question
 from schemas import ReviewAction
 
 
@@ -166,11 +167,18 @@ async def query_lease(
     lease = await session.get(LeaseRecord, lease_id)
     if lease is None:
         raise HTTPException(status_code=404, detail=f"Lease {lease_id} not found")
-    # TODO: Claude Haiku call grounded on lease.extraction
-    return {
-        "answer": f"Q&A not yet implemented. Asked: {req.question}",
-        "citations": [],
-    }
+    if lease.extraction is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Lease {lease_id} has no extraction yet (status={lease.status})",
+        )
+    try:
+        result = await answer_question(lease.extraction, req.question)
+    except Exception as exc:  # noqa: BLE001 — surface upstream LLM failures as 502
+        raise HTTPException(
+            status_code=502, detail=f"Q&A failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    return result.model_dump()
 
 
 # ---------------------------------------------------------------------------
