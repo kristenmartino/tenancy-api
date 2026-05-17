@@ -139,6 +139,39 @@ Return ONLY the JSON object. No preamble, no markdown fences."""
 
 EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "claude-sonnet-4-6")
 EXTRACT_MAX_TOKENS = int(os.getenv("EXTRACT_MAX_TOKENS", "4096"))
+TEMPLATE_MODEL = os.getenv("TEMPLATE_MODEL", "claude-haiku-4-5-20251001")
+TEMPLATE_DETECTION_MAX_CHARS = 4000
+
+
+TEMPLATE_DETECTION_PROMPT = """Classify the following residential lease excerpt as one of these templates:
+
+- taa: Texas Apartment Association
+- naa: National Apartment Association
+- ca_residential: California residential lease
+- fl_residential: Florida residential lease
+- unknown: doesn't clearly match any of the above
+
+Return ONLY the lowercase template code. No preamble, no explanation.
+
+Lease excerpt:
+{excerpt}"""
+
+
+async def _detect_template(client: AsyncAnthropic, text: str) -> LeaseTemplate:
+    """Classify lease text against the LeaseTemplate enum via a quick Haiku call."""
+    prompt = TEMPLATE_DETECTION_PROMPT.format(excerpt=text[:TEMPLATE_DETECTION_MAX_CHARS])
+    response = await client.messages.create(
+        model=TEMPLATE_MODEL,
+        max_tokens=32,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    block = response.content[0]
+    if not hasattr(block, "text"):
+        return LeaseTemplate.UNKNOWN
+    try:
+        return LeaseTemplate(block.text.strip().lower())
+    except ValueError:
+        return LeaseTemplate.UNKNOWN
 
 
 class PartiesSection(BaseModel):
@@ -214,18 +247,20 @@ async def extract_fields(
         client = AsyncAnthropic()
 
     try:
-        tasks = [
+        template_task = asyncio.create_task(_detect_template(client, state.raw_text))
+        section_tasks = [
             _extract_section(client, model, state.raw_text) for model in SECTION_MODELS.values()
         ]
-        results = await asyncio.gather(*tasks)
-        sections = dict(zip(SECTION_MODELS.keys(), results, strict=True))
+        section_results = await asyncio.gather(*section_tasks)
+        template = await template_task
+        sections = dict(zip(SECTION_MODELS.keys(), section_results, strict=True))
 
         parties_section = sections["parties"]
         assert isinstance(parties_section, PartiesSection)
 
         extraction = LeaseExtraction(
             lease_id=state.document_id,
-            template_detected=LeaseTemplate.UNKNOWN,  # TODO: detect from text
+            template_detected=template,
             parties=parties_section.parties,
             property=sections["property"],  # type: ignore[arg-type]
             term=sections["term"],  # type: ignore[arg-type]
