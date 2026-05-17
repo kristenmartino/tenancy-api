@@ -4,7 +4,15 @@
 
 Built in 48 hours as a portfolio piece. Targets the workflow that RealPage and every other multifamily operator runs at scale: turning lease documents into structured data with humans in the loop on the edges.
 
-Live at `tenancy.kristenmartino.ai`.
+Live at `tenancy.kristenmartino.ai`. API at https://tenancy-api-production.up.railway.app (Railway) backed by Neon Postgres.
+
+```bash
+# Try it
+curl -X POST https://tenancy-api-production.up.railway.app/leases \
+  -H 'Content-Type: application/json' \
+  -d '{"pdf_url":"https://www.sanantonio.gov/Portals/0/Files/NHSD/Programs/FairHousing/LeaseAgreement.pdf"}'
+# {"lease_id":"...", "status":"pending"}  → poll GET /leases/{id} until status=complete
+```
 
 ---
 
@@ -114,6 +122,26 @@ Each field includes `value`, `confidence`, `page_number`, and `char_span`.
 | `resolve_exception(exception_id, action, correction=None)` | Approve / edit / reject |
 
 The Claude Desktop demo: *"Show me all leases expiring in the next 12 months and flag any with early termination clauses."* Claude calls `list_leases` + `get_lease` and reasons over structured fields with source citations.
+
+### Wiring it into Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "tenancy": {
+      "command": "/Users/you/tenancy-api/.venv/bin/python",
+      "args": ["/Users/you/tenancy-api/mcp_server.py"],
+      "env": {
+        "TENANCY_API_BASE": "https://tenancy-api-production.up.railway.app"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The six tools above show up under the MCP server icon.
 
 ## What's real vs scaffolded
 
