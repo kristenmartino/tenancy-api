@@ -66,6 +66,25 @@ Live at `tenancy.kristenmartino.ai`.
 
 Mirrors the Sift stack intentionally — same two-service shape, same hosting, same DB pattern. Demonstrates a reusable architecture for unstructured-doc-to-structured-data agent systems.
 
+## Configuration
+
+Required:
+- `ANTHROPIC_API_KEY` — Sonnet 4.6 for extraction, Haiku 4.5 for template detection and Q&A.
+
+Optional:
+- `DATABASE_URL` — defaults to `sqlite+aiosqlite:///tenancy.db` for local dev. For Neon: `postgresql+asyncpg://user:pass@host/dbname?ssl=require` (asyncpg uses `ssl=`, not libpq's `sslmode=`).
+- `EXTRACT_MODEL`, `QA_MODEL`, `TEMPLATE_MODEL` — model overrides.
+- `EXTRACT_MAX_TOKENS`, `QA_MAX_TOKENS` — token caps per call.
+- `PDF_FETCH_TIMEOUT` — seconds (default 30).
+- `MIN_TEXT_LEN_PER_PAGE` — pages below this much extracted text are flagged for vision fallback (default 50 chars).
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+export ANTHROPIC_API_KEY=sk-ant-...
+uvicorn app:app --reload
+```
+
 ## The schema
 
 Residential leases anchor on the Texas Apartment Association (TAA) template. The extraction schema generalizes across TAA, NAA, California, and Florida variants. See `schemas.py` for the full Pydantic models.

@@ -1,3 +1,10 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["app", "db", "graph", "mcp_server", "qa", "schemas"]
+
 [project]
 name = "tenancy-api"
 version = "0.1.0"
@@ -14,6 +21,7 @@ dependencies = [
     "pypdf>=4.0",
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20",
+    "asyncpg>=0.29",
 ]
 
 [project.optional-dependencies]
