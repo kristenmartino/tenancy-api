@@ -13,12 +13,20 @@ This is scaffolding. Replace the TODOs with real implementations during build.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import Any
 from uuid import UUID, uuid4
 
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 
-from schemas import LeaseException, LeaseExtraction
+from schemas import (
+    ExceptionSeverity,
+    ExceptionType,
+    ExtractedField,
+    LeaseException,
+    LeaseExtraction,
+)
 
 # ---------------------------------------------------------------------------
 # State
@@ -116,22 +124,152 @@ def extract_fields(state: ExtractionState) -> ExtractionState:
 # Node: validate
 # ---------------------------------------------------------------------------
 
+LOW_CONFIDENCE_THRESHOLD = 0.7
+SECURITY_DEPOSIT_MAX_MULTIPLIER = 3  # Heuristic; state caps vary
+
+
+def _walk_extracted_fields(obj: Any, path: str = "") -> Iterator[tuple[str, ExtractedField]]:
+    """Yield (dot-path, ExtractedField) for every ExtractedField in the model tree."""
+    if isinstance(obj, ExtractedField):
+        yield path, obj
+        return
+    if isinstance(obj, BaseModel):
+        for name in type(obj).model_fields:
+            child_path = f"{path}.{name}" if path else name
+            yield from _walk_extracted_fields(getattr(obj, name), child_path)
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            yield from _walk_extracted_fields(item, f"{path}[{i}]")
+
+
 def validate_extraction(state: ExtractionState) -> ExtractionState:
     """
     Rule-based validation. Generates exceptions for the review queue.
 
     Checks:
-      - Required fields present (parties, property, term, rent.base_monthly_rent,
-        deposits.security_deposit, compliance.lead_paint_disclosure)
+      - Required-but-null values for top-level fields
       - term.end_date > term.start_date
       - rent.base_monthly_rent > 0
-      - deposits.security_deposit <= 3x base_monthly_rent (state caps vary; flag if exceeded)
-      - rent.late_fee_flat consistent with grace_period_days
-      - For pre-1978 properties: lead_paint_disclosure must be True
-      - Low-confidence fields (confidence < 0.7) -> LOW_CONFIDENCE exception
-      - Unusual clauses (e.g. waiver of military clause) -> UNUSUAL_CLAUSE exception
+      - deposits.security_deposit <= 3x base_monthly_rent (heuristic; state caps vary)
+      - rent.late_fee_flat paired with grace_period_days
+      - Lead paint disclosure presence (federally mandated)
+      - Low-confidence fields (confidence < 0.7) anywhere in the tree
     """
-    # TODO: implement rules; emit LeaseException for each violation
+    if state.extraction is None:
+        state.status = "validated"
+        return state
+
+    extraction = state.extraction
+
+    def flag(
+        field_path: str,
+        exc_type: ExceptionType,
+        severity: ExceptionSeverity,
+        description: str,
+        suggested: str | None = None,
+    ) -> None:
+        state.exceptions.append(
+            LeaseException(
+                exception_id=uuid4(),
+                lease_id=extraction.lease_id,
+                field_path=field_path,
+                exception_type=exc_type,
+                severity=severity,
+                description=description,
+                suggested_action=suggested,
+            )
+        )
+
+    # Low-confidence sweep across the whole tree
+    for path, field in _walk_extracted_fields(extraction):
+        if field.confidence < LOW_CONFIDENCE_THRESHOLD:
+            flag(
+                path,
+                ExceptionType.LOW_CONFIDENCE,
+                ExceptionSeverity.WARNING,
+                f"Confidence {field.confidence:.2f} below threshold {LOW_CONFIDENCE_THRESHOLD}",
+                "Review the source citation and confirm or correct.",
+            )
+
+    # Required-but-null check on hot fields (pydantic enforces presence; this checks .value)
+    required: list[tuple[str, Any]] = [
+        ("property.street_address", extraction.property.street_address.value),
+        ("term.start_date", extraction.term.start_date.value),
+        ("term.end_date", extraction.term.end_date.value),
+        ("rent.base_monthly_rent", extraction.rent.base_monthly_rent.value),
+        ("deposits.security_deposit", extraction.deposits.security_deposit.value),
+    ]
+    for path, value in required:
+        if value is None:
+            flag(
+                path,
+                ExceptionType.MISSING_REQUIRED_FIELD,
+                ExceptionSeverity.BLOCKING,
+                f"{path} is required but value is null in the extraction.",
+            )
+    if not extraction.parties:
+        flag(
+            "parties",
+            ExceptionType.MISSING_REQUIRED_FIELD,
+            ExceptionSeverity.BLOCKING,
+            "No parties extracted.",
+        )
+
+    # Date consistency
+    start = extraction.term.start_date.value
+    end = extraction.term.end_date.value
+    if start and end and end <= start:
+        flag(
+            "term.end_date",
+            ExceptionType.INTERNAL_INCONSISTENCY,
+            ExceptionSeverity.BLOCKING,
+            f"end_date ({end}) must be after start_date ({start})",
+        )
+
+    # Positive rent
+    rent_value = extraction.rent.base_monthly_rent.value
+    if rent_value is not None and rent_value <= 0:
+        flag(
+            "rent.base_monthly_rent",
+            ExceptionType.INTERNAL_INCONSISTENCY,
+            ExceptionSeverity.BLOCKING,
+            f"base_monthly_rent ({rent_value}) must be > 0",
+        )
+
+    # Deposit cap (heuristic)
+    deposit = extraction.deposits.security_deposit.value
+    if rent_value and deposit and deposit > SECURITY_DEPOSIT_MAX_MULTIPLIER * rent_value:
+        flag(
+            "deposits.security_deposit",
+            ExceptionType.UNUSUAL_CLAUSE,
+            ExceptionSeverity.WARNING,
+            f"Security deposit ({deposit}) exceeds {SECURITY_DEPOSIT_MAX_MULTIPLIER}x monthly "
+            f"rent ({rent_value}). State caps vary.",
+            "Verify against local statute (e.g. CA caps at 2x; TX has no statutory cap).",
+        )
+
+    # Late fee paired with grace period
+    late_fee_field = extraction.rent.late_fee_flat
+    grace_field = extraction.rent.grace_period_days
+    late_fee = late_fee_field.value if late_fee_field else None
+    grace_days = grace_field.value if grace_field else None
+    if late_fee and grace_days is None:
+        flag(
+            "rent.grace_period_days",
+            ExceptionType.MISSING_REQUIRED_FIELD,
+            ExceptionSeverity.WARNING,
+            "Late fee is set but grace period is missing.",
+        )
+
+    # Lead paint disclosure presence (required for pre-1978 properties)
+    if extraction.compliance.lead_paint_disclosure.value is None:
+        flag(
+            "compliance.lead_paint_disclosure",
+            ExceptionType.COMPLIANCE_GAP,
+            ExceptionSeverity.BLOCKING,
+            "Lead paint disclosure status undetermined. Required for pre-1978 properties.",
+        )
+
     state.status = "validated"
     return state
 
