@@ -211,32 +211,38 @@ async def extract_fields(
     if client is None:
         client = AsyncAnthropic()
 
-    tasks = [_extract_section(client, model, state.raw_text) for model in SECTION_MODELS.values()]
-    results = await asyncio.gather(*tasks)
-    sections = dict(zip(SECTION_MODELS.keys(), results, strict=True))
+    try:
+        tasks = [
+            _extract_section(client, model, state.raw_text) for model in SECTION_MODELS.values()
+        ]
+        results = await asyncio.gather(*tasks)
+        sections = dict(zip(SECTION_MODELS.keys(), results, strict=True))
 
-    parties_section = sections["parties"]
-    assert isinstance(parties_section, PartiesSection)
+        parties_section = sections["parties"]
+        assert isinstance(parties_section, PartiesSection)
 
-    extraction = LeaseExtraction(
-        lease_id=state.document_id,
-        template_detected=LeaseTemplate.UNKNOWN,  # TODO: detect from text
-        parties=parties_section.parties,
-        property=sections["property"],  # type: ignore[arg-type]
-        term=sections["term"],  # type: ignore[arg-type]
-        rent=sections["rent"],  # type: ignore[arg-type]
-        deposits=sections["deposits"],  # type: ignore[arg-type]
-        utilities=sections["utilities"],  # type: ignore[arg-type]
-        pets=sections["pets"],  # type: ignore[arg-type]
-        special_clauses=sections["special_clauses"],  # type: ignore[arg-type]
-        compliance=sections["compliance"],  # type: ignore[arg-type]
-        overall_confidence=0.0,  # set below from the assembled tree
-    )
-    confidences = [f.confidence for _, f in _walk_extracted_fields(extraction)]
-    extraction.overall_confidence = sum(confidences) / max(len(confidences), 1)
+        extraction = LeaseExtraction(
+            lease_id=state.document_id,
+            template_detected=LeaseTemplate.UNKNOWN,  # TODO: detect from text
+            parties=parties_section.parties,
+            property=sections["property"],  # type: ignore[arg-type]
+            term=sections["term"],  # type: ignore[arg-type]
+            rent=sections["rent"],  # type: ignore[arg-type]
+            deposits=sections["deposits"],  # type: ignore[arg-type]
+            utilities=sections["utilities"],  # type: ignore[arg-type]
+            pets=sections["pets"],  # type: ignore[arg-type]
+            special_clauses=sections["special_clauses"],  # type: ignore[arg-type]
+            compliance=sections["compliance"],  # type: ignore[arg-type]
+            overall_confidence=0.0,  # set below from the assembled tree
+        )
+        confidences = [f.confidence for _, f in _walk_extracted_fields(extraction)]
+        extraction.overall_confidence = sum(confidences) / max(len(confidences), 1)
 
-    state.extraction = extraction
-    state.status = "extracted"
+        state.extraction = extraction
+        state.status = "extracted"
+    except Exception as exc:  # noqa: BLE001 — node boundary: surface failures via state.error
+        state.error = f"Extraction failed: {type(exc).__name__}: {exc}"
+        state.status = "extract_failed"
     return state
 
 

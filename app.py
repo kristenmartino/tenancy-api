@@ -7,6 +7,10 @@ background task so POST /leases returns 202 immediately.
 """
 from __future__ import annotations
 
+import os
+import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -16,7 +20,19 @@ from pydantic import BaseModel
 from graph import run_extraction
 from schemas import LeaseException, ReviewAction
 
-app = FastAPI(title="tenancy-api", version="0.1.0")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print(
+            "WARNING: ANTHROPIC_API_KEY is not set. extract_fields will fail "
+            "with anthropic.AuthenticationError on every lease.",
+            file=sys.stderr,
+        )
+    yield
+
+
+app = FastAPI(lifespan=_lifespan, title="tenancy-api", version="0.1.0")
 
 # In-memory stores (replace with Postgres in v1)
 _leases: dict[UUID, dict[str, Any]] = {}
