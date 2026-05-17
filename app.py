@@ -153,7 +153,10 @@ async def create_lease(
         raise HTTPException(status_code=400, detail="pdf_url must be an HTTPS URL")
     lease_id = uuid4()
     session.add(LeaseRecord(lease_id=lease_id, pdf_url=req.pdf_url, status="pending"))
-    # Session commits on dependency exit, before the background task runs.
+    # Explicit commit: post-yield code in a FastAPI dep runs AFTER bg tasks
+    # finish, so without this the bg task's persist_results would race the
+    # parent INSERT and the exception rows would FK-violate.
+    await session.commit()
     bg.add_task(_run_pipeline, req.pdf_url, lease_id)
     return {"lease_id": str(lease_id), "status": "pending"}
 
@@ -218,4 +221,5 @@ async def resolve_exception(
     exc.resolved = True
     exc.resolution = ReviewAction(req.action).value
     exc.correction = req.correction
+    await session.commit()
     return _exception_to_dict(exc)

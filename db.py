@@ -79,11 +79,16 @@ async def init_db() -> None:
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    """FastAPI dependency: yields a session, commits/rollbacks around the request."""
+    """FastAPI dependency: yields a session, rolls back on error.
+
+    Endpoints commit explicitly so the write happens before BackgroundTasks
+    run (the post-yield code in a FastAPI dep runs AFTER bg tasks complete —
+    which means bg tasks observe a still-uncommitted session if you rely on
+    the dep to commit).
+    """
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
             await session.rollback()
             raise
