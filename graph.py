@@ -13,19 +13,33 @@ This is scaffolding. Replace the TODOs with real implementations during build.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 from collections.abc import Iterator
 from typing import Any
 from uuid import UUID, uuid4
 
+from anthropic import AsyncAnthropic
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 
 from schemas import (
+    ComplianceDisclosures,
+    Deposits,
     ExceptionSeverity,
     ExceptionType,
     ExtractedField,
     LeaseException,
     LeaseExtraction,
+    LeaseTemplate,
+    Party,
+    Pets,
+    Property,
+    Rent,
+    SpecialClauses,
+    Term,
+    Utilities,
 )
 
 # ---------------------------------------------------------------------------
@@ -95,27 +109,105 @@ Document:
 Return ONLY the JSON object. No preamble, no markdown fences."""
 
 
-def extract_fields(state: ExtractionState) -> ExtractionState:
-    """
-    Call Claude Sonnet 4.6 per section to populate the LeaseExtraction model.
+EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "claude-sonnet-4-6")
+EXTRACT_MAX_TOKENS = int(os.getenv("EXTRACT_MAX_TOKENS", "4096"))
 
-    Sectioned approach (parallelizable):
-      - parties
-      - property
-      - term
-      - rent
-      - deposits
-      - utilities
-      - pets
-      - special_clauses
-      - compliance
 
-    For pages_needing_vision, attach the page image to the request and use
-    Claude's vision capability.
+class PartiesSection(BaseModel):
+    """Wrapper so parties has an object-shaped JSON contract for the LLM."""
+    parties: list[Party]
+
+
+SECTION_MODELS: dict[str, type[BaseModel]] = {
+    "parties": PartiesSection,
+    "property": Property,
+    "term": Term,
+    "rent": Rent,
+    "deposits": Deposits,
+    "utilities": Utilities,
+    "pets": Pets,
+    "special_clauses": SpecialClauses,
+    "compliance": ComplianceDisclosures,
+}
+
+
+def _build_prompt(schema: dict[str, Any], document: str) -> str:
+    # String replacement (not .format) because the prompt contains literal
+    # braces in the {page_number, char_start, char_end, snippet} description.
+    return EXTRACTION_PROMPT.replace("{schema}", json.dumps(schema, indent=2)).replace(
+        "{document}", document
+    )
+
+
+def _strip_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    if text.endswith("```"):
+        text = text.rsplit("```", 1)[0]
+    return text.strip()
+
+
+async def _extract_section(
+    client: AsyncAnthropic,
+    schema_class: type[BaseModel],
+    document: str,
+) -> BaseModel:
+    """Call the LLM for one section; parse, validate, return."""
+    prompt = _build_prompt(schema_class.model_json_schema(), document)
+    response = await client.messages.create(
+        model=EXTRACT_MODEL,
+        max_tokens=EXTRACT_MAX_TOKENS,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    block = response.content[0]
+    if not hasattr(block, "text"):
+        raise ValueError(f"Unexpected response block type: {type(block).__name__}")
+    return schema_class.model_validate(json.loads(_strip_fences(block.text)))
+
+
+async def extract_fields(
+    state: ExtractionState,
+    client: AsyncAnthropic | None = None,
+) -> ExtractionState:
     """
-    # TODO: per-section structured output calls
-    # TODO: assemble into LeaseExtraction
-    # TODO: compute overall_confidence as a weighted average of field confidences
+    Call Claude per section, in parallel, to populate the LeaseExtraction model.
+
+    Vision support for pages_needing_vision is not yet implemented — text-only.
+    The optional client parameter exists for dependency injection in tests.
+    """
+    if not state.raw_text:
+        state.status = "extracted"
+        return state
+
+    if client is None:
+        client = AsyncAnthropic()
+
+    tasks = [_extract_section(client, model, state.raw_text) for model in SECTION_MODELS.values()]
+    results = await asyncio.gather(*tasks)
+    sections = dict(zip(SECTION_MODELS.keys(), results, strict=True))
+
+    parties_section = sections["parties"]
+    assert isinstance(parties_section, PartiesSection)
+
+    extraction = LeaseExtraction(
+        lease_id=state.document_id,
+        template_detected=LeaseTemplate.UNKNOWN,  # TODO: detect from text
+        parties=parties_section.parties,
+        property=sections["property"],  # type: ignore[arg-type]
+        term=sections["term"],  # type: ignore[arg-type]
+        rent=sections["rent"],  # type: ignore[arg-type]
+        deposits=sections["deposits"],  # type: ignore[arg-type]
+        utilities=sections["utilities"],  # type: ignore[arg-type]
+        pets=sections["pets"],  # type: ignore[arg-type]
+        special_clauses=sections["special_clauses"],  # type: ignore[arg-type]
+        compliance=sections["compliance"],  # type: ignore[arg-type]
+        overall_confidence=0.0,  # set below from the assembled tree
+    )
+    confidences = [f.confidence for _, f in _walk_extracted_fields(extraction)]
+    extraction.overall_confidence = sum(confidences) / max(len(confidences), 1)
+
+    state.extraction = extraction
     state.status = "extracted"
     return state
 
