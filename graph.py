@@ -204,6 +204,8 @@ async def extract_fields(
     Vision support for pages_needing_vision is not yet implemented — text-only.
     The optional client parameter exists for dependency injection in tests.
     """
+    if state.error:
+        return state
     if not state.raw_text:
         state.status = "extracted"
         return state
@@ -281,6 +283,8 @@ def validate_extraction(state: ExtractionState) -> ExtractionState:
       - Lead paint disclosure presence (federally mandated)
       - Low-confidence fields (confidence < 0.7) anywhere in the tree
     """
+    if state.error:
+        return state
     if state.extraction is None:
         state.status = "validated"
         return state
@@ -424,7 +428,7 @@ async def persist_results(state: ExtractionState) -> ExtractionState:
                 status=state.status,
             )
             session.add(lease)
-        lease.status = "complete" if state.status not in {"extract_failed", "ingest_failed"} else state.status
+        lease.status = state.status if state.error else "complete"
         lease.raw_text = state.raw_text
         lease.error = state.error
         if state.extraction is not None:

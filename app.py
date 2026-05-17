@@ -1,8 +1,8 @@
 """
 FastAPI app for the tenancy backend.
 
-Exposes the six endpoints the MCP server calls. In-memory stores stand in for
-Postgres until the persistence layer lands. Extraction is dispatched as a
+Exposes the six endpoints the MCP server calls. Backed by SQLAlchemy + SQLite
+locally; swap DATABASE_URL to a Postgres URL for prod. Extraction runs in a
 background task so POST /leases returns 202 immediately.
 """
 from __future__ import annotations
@@ -11,14 +11,17 @@ import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from db import ExceptionRecord, LeaseRecord, get_session, init_db
 from graph import run_extraction
-from schemas import LeaseException, ReviewAction
+from schemas import ReviewAction
 
 
 @asynccontextmanager
@@ -29,14 +32,12 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "with anthropic.AuthenticationError on every lease.",
             file=sys.stderr,
         )
+    await init_db()
     yield
 
 
 app = FastAPI(lifespan=_lifespan, title="tenancy-api", version="0.1.0")
-
-# In-memory stores (replace with Postgres in v1)
-_leases: dict[UUID, dict[str, Any]] = {}
-_exceptions: dict[UUID, LeaseException] = {}
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,39 @@ class ResolveRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Serializers
+# ---------------------------------------------------------------------------
+
+def _lease_to_dict(lease: LeaseRecord, exception_count: int = 0) -> dict[str, Any]:
+    return {
+        "lease_id": str(lease.lease_id),
+        "pdf_url": lease.pdf_url,
+        "status": lease.status,
+        "extraction": lease.extraction,
+        "error": lease.error,
+        "exception_count": exception_count,
+        "created_at": lease.created_at.isoformat(),
+        "updated_at": lease.updated_at.isoformat(),
+    }
+
+
+def _exception_to_dict(exc: ExceptionRecord) -> dict[str, Any]:
+    return {
+        "exception_id": str(exc.exception_id),
+        "lease_id": str(exc.lease_id),
+        "field_path": exc.field_path,
+        "exception_type": exc.exception_type,
+        "severity": exc.severity,
+        "description": exc.description,
+        "suggested_action": exc.suggested_action,
+        "resolved": exc.resolved,
+        "resolution": exc.resolution,
+        "correction": exc.correction,
+        "created_at": exc.created_at.isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
@@ -71,55 +105,68 @@ async def health() -> dict[str, str]:
 
 @app.get("/leases")
 async def list_leases(
+    session: SessionDep,
     status: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    items = list(_leases.values())
+    count_sq = (
+        select(func.count(ExceptionRecord.exception_id))
+        .where(ExceptionRecord.lease_id == LeaseRecord.lease_id)
+        .where(ExceptionRecord.resolved.is_(False))
+        .correlate(LeaseRecord)
+        .scalar_subquery()
+    )
+    stmt = select(LeaseRecord, count_sq.label("exc_count"))
     if status:
-        items = [x for x in items if x["status"] == status]
-    return items[:limit]
+        stmt = stmt.where(LeaseRecord.status == status)
+    stmt = stmt.order_by(LeaseRecord.created_at.desc()).limit(limit)
+    result = await session.execute(stmt)
+    return [_lease_to_dict(lease, count) for lease, count in result.all()]
 
 
 @app.get("/leases/{lease_id}")
-async def get_lease(lease_id: UUID) -> dict[str, Any]:
-    record = _leases.get(lease_id)
-    if record is None:
+async def get_lease(lease_id: UUID, session: SessionDep) -> dict[str, Any]:
+    lease = await session.get(LeaseRecord, lease_id)
+    if lease is None:
         raise HTTPException(status_code=404, detail=f"Lease {lease_id} not found")
-    return record
+    count_result = await session.execute(
+        select(func.count(ExceptionRecord.exception_id))
+        .where(ExceptionRecord.lease_id == lease_id)
+        .where(ExceptionRecord.resolved.is_(False))
+    )
+    return _lease_to_dict(lease, count_result.scalar_one())
 
 
-async def _run_and_store(pdf_url: str, lease_id: UUID) -> None:
-    """Background task: run the extraction graph and persist results."""
-    state = await run_extraction(pdf_url)
-    record = _leases[lease_id]
-    record["status"] = state.status
-    if state.extraction is not None:
-        record["extraction"] = state.extraction.model_dump(mode="json")
-    for exc in state.exceptions:
-        _exceptions[exc.exception_id] = exc
-    record["exception_count"] = sum(1 for e in state.exceptions if not e.resolved)
+async def _run_pipeline(pdf_url: str, lease_id: UUID) -> None:
+    """Background task: run the extraction graph; persist_results writes to DB."""
+    await run_extraction(pdf_url, document_id=lease_id)
 
 
 @app.post("/leases", status_code=202)
-async def create_lease(req: ExtractRequest, bg: BackgroundTasks) -> dict[str, str]:
+async def create_lease(
+    req: ExtractRequest,
+    bg: BackgroundTasks,
+    session: SessionDep,
+) -> dict[str, str]:
     if not req.pdf_url.startswith("https://"):
         raise HTTPException(status_code=400, detail="pdf_url must be an HTTPS URL")
     lease_id = uuid4()
-    _leases[lease_id] = {
-        "lease_id": str(lease_id),
-        "pdf_url": req.pdf_url,
-        "status": "pending",
-        "exception_count": 0,
-    }
-    bg.add_task(_run_and_store, req.pdf_url, lease_id)
+    session.add(LeaseRecord(lease_id=lease_id, pdf_url=req.pdf_url, status="pending"))
+    # Session commits on dependency exit, before the background task runs.
+    bg.add_task(_run_pipeline, req.pdf_url, lease_id)
     return {"lease_id": str(lease_id), "status": "pending"}
 
 
 @app.post("/leases/{lease_id}/query")
-async def query_lease(lease_id: UUID, req: QueryRequest) -> dict[str, Any]:
-    if lease_id not in _leases:
+async def query_lease(
+    lease_id: UUID,
+    req: QueryRequest,
+    session: SessionDep,
+) -> dict[str, Any]:
+    lease = await session.get(LeaseRecord, lease_id)
+    if lease is None:
         raise HTTPException(status_code=404, detail=f"Lease {lease_id} not found")
-    # TODO: Claude Haiku call grounded on the structured extraction
+    # TODO: Claude Haiku call grounded on lease.extraction
     return {
         "answer": f"Q&A not yet implemented. Asked: {req.question}",
         "citations": [],
@@ -132,24 +179,28 @@ async def query_lease(lease_id: UUID, req: QueryRequest) -> dict[str, Any]:
 
 @app.get("/exceptions")
 async def list_exceptions(
+    session: SessionDep,
     lease_id: UUID | None = None,
     severity: str | None = None,
     resolved: bool = False,
 ) -> list[dict[str, Any]]:
-    items = [e for e in _exceptions.values() if e.resolved == resolved]
+    stmt = select(ExceptionRecord).where(ExceptionRecord.resolved.is_(resolved))
     if lease_id is not None:
-        items = [e for e in items if e.lease_id == lease_id]
+        stmt = stmt.where(ExceptionRecord.lease_id == lease_id)
     if severity:
-        items = [e for e in items if e.severity.value == severity]
-    return [e.model_dump(mode="json") for e in items]
+        stmt = stmt.where(ExceptionRecord.severity == severity)
+    stmt = stmt.order_by(ExceptionRecord.created_at.desc())
+    result = await session.execute(stmt)
+    return [_exception_to_dict(e) for e in result.scalars().all()]
 
 
 @app.post("/exceptions/{exception_id}/resolve")
 async def resolve_exception(
     exception_id: UUID,
     req: ResolveRequest,
+    session: SessionDep,
 ) -> dict[str, Any]:
-    exc = _exceptions.get(exception_id)
+    exc = await session.get(ExceptionRecord, exception_id)
     if exc is None:
         raise HTTPException(status_code=404, detail=f"Exception {exception_id} not found")
     if req.action not in {"approve", "edit", "reject"}:
@@ -157,6 +208,6 @@ async def resolve_exception(
     if req.action == "edit" and req.correction is None:
         raise HTTPException(status_code=400, detail="correction required when action='edit'")
     exc.resolved = True
-    exc.resolution = ReviewAction(req.action)
+    exc.resolution = ReviewAction(req.action).value
     exc.correction = req.correction
-    return exc.model_dump(mode="json")
+    return _exception_to_dict(exc)
