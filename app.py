@@ -15,6 +15,7 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,17 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=_lifespan, title="tenancy-api", version="0.1.0")
+
+# CORS — open by default for the portfolio demo. Tighten by setting
+# CORS_ORIGINS to a comma-separated list of allowed origins for prod.
+_cors_origins = os.getenv("CORS_ORIGINS", "*").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
