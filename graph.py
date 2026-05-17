@@ -14,6 +14,7 @@ This is scaffolding. Replace the TODOs with real implementations during build.
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import os
@@ -54,8 +55,8 @@ class ExtractionState(BaseModel):
     document_id: UUID
     pdf_url: str
     raw_text: str | None = None
+    pdf_bytes: bytes | None = Field(default=None, exclude=True, repr=False)
     page_count: int = 0
-    page_images: list[str] = Field(default_factory=list)  # Cloud blob URLs
     pages_needing_vision: list[int] = Field(default_factory=list)
     extraction: LeaseExtraction | None = None
     exceptions: list[LeaseException] = Field(default_factory=list)
@@ -106,6 +107,7 @@ async def ingest_document(state: ExtractionState) -> ExtractionState:
 
     state.raw_text = "\n\n".join(page_texts)
     state.pages_needing_vision = pages_needing_vision
+    state.pdf_bytes = pdf_bytes  # retained for extract's vision fallback
     state.status = "ingested"
     return state
 
@@ -213,13 +215,31 @@ async def _extract_section(
     client: AsyncAnthropic,
     schema_class: type[BaseModel],
     document: str,
+    pdf_bytes: bytes | None = None,
 ) -> BaseModel:
-    """Call the LLM for one section; parse, validate, return."""
+    """Call the LLM for one section; parse, validate, return.
+
+    When pdf_bytes is provided, attach the raw PDF as a document block so the
+    model can use vision for content where text extraction was incomplete.
+    """
     prompt = _build_prompt(schema_class.model_json_schema(), document)
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    if pdf_bytes:
+        content.insert(
+            0,
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": base64.b64encode(pdf_bytes).decode(),
+                },
+            },
+        )
     response = await client.messages.create(
         model=EXTRACT_MODEL,
         max_tokens=EXTRACT_MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": content}],  # type: ignore[typeddict-item]
     )
     block = response.content[0]
     if not hasattr(block, "text"):
@@ -247,9 +267,15 @@ async def extract_fields(
         client = AsyncAnthropic()
 
     try:
+        # Attach the raw PDF for vision fallback when text extraction was
+        # incomplete on any page. Costs more tokens (PDF sent per section)
+        # but unlocks scanned-PDF support without poppler / blob storage.
+        pdf_bytes = state.pdf_bytes if state.pages_needing_vision else None
+
         template_task = asyncio.create_task(_detect_template(client, state.raw_text))
         section_tasks = [
-            _extract_section(client, model, state.raw_text) for model in SECTION_MODELS.values()
+            _extract_section(client, model, state.raw_text, pdf_bytes)
+            for model in SECTION_MODELS.values()
         ]
         section_results = await asyncio.gather(*section_tasks)
         template = await template_task
