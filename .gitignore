@@ -19,5 +19,11 @@ venv/
 .env.*
 !.env.example
 
+# Local databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # OS
 .DS_Store

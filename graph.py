@@ -404,17 +404,51 @@ def validate_extraction(state: ExtractionState) -> ExtractionState:
 # Node: persist
 # ---------------------------------------------------------------------------
 
-def persist_results(state: ExtractionState) -> ExtractionState:
+async def persist_results(state: ExtractionState) -> ExtractionState:
     """
-    Write extraction + exceptions to Postgres.
+    Upsert the lease record + insert exceptions via SQLAlchemy.
 
-    Tables touched:
-      - documents (status update)
-      - extractions (full LeaseExtraction JSON + flat columns for the hot fields)
-      - exceptions (one row per LeaseException)
+    Uses the shared async engine from db.py. Idempotent on lease_id: re-running
+    an extraction updates the existing row in place. Exceptions are inserted
+    fresh per run (assumes the caller cleared prior unresolved exceptions if
+    re-extracting; resolved exceptions are preserved for audit).
     """
-    # TODO: SQLAlchemy writes
-    state.status = "complete"
+    from db import AsyncSessionLocal, ExceptionRecord, LeaseRecord
+
+    async with AsyncSessionLocal() as session:
+        lease = await session.get(LeaseRecord, state.document_id)
+        if lease is None:
+            lease = LeaseRecord(
+                lease_id=state.document_id,
+                pdf_url=state.pdf_url,
+                status=state.status,
+            )
+            session.add(lease)
+        lease.status = "complete" if state.status not in {"extract_failed", "ingest_failed"} else state.status
+        lease.raw_text = state.raw_text
+        lease.error = state.error
+        if state.extraction is not None:
+            lease.extraction = state.extraction.model_dump(mode="json")
+
+        for exc in state.exceptions:
+            session.add(
+                ExceptionRecord(
+                    exception_id=exc.exception_id,
+                    lease_id=exc.lease_id,
+                    field_path=exc.field_path,
+                    exception_type=exc.exception_type.value,
+                    severity=exc.severity.value,
+                    description=exc.description,
+                    suggested_action=exc.suggested_action,
+                    resolved=exc.resolved,
+                    resolution=exc.resolution.value if exc.resolution else None,
+                    correction=exc.correction,
+                )
+            )
+
+        await session.commit()
+
+    state.status = lease.status
     return state
 
 
@@ -439,8 +473,8 @@ def build_graph():
 
 
 # Convenience entrypoint for the API layer
-async def run_extraction(pdf_url: str) -> ExtractionState:
+async def run_extraction(pdf_url: str, document_id: UUID | None = None) -> ExtractionState:
     graph = build_graph()
-    initial = ExtractionState(document_id=uuid4(), pdf_url=pdf_url)
+    initial = ExtractionState(document_id=document_id or uuid4(), pdf_url=pdf_url)
     final_state = await graph.ainvoke(initial)
     return ExtractionState.model_validate(final_state)
