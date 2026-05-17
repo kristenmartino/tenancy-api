@@ -19,7 +19,13 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///tenancy.db")
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+# asyncpg's default prepared-statement cache is incompatible with PgBouncer
+# transaction pooling (Neon's -pooler endpoints). Disabling it is a small perf
+# hit on simple queries but is a no-op for non-pooled connections.
+_connect_args: dict[str, object] = (
+    {"prepared_statement_cache_size": 0} if "+asyncpg" in DATABASE_URL else {}
+)
+engine = create_async_engine(DATABASE_URL, echo=False, connect_args=_connect_args)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -37,10 +43,10 @@ class LeaseRecord(Base):
     extraction: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime, default=lambda: dt.datetime.now(dt.UTC)
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC)
     )
     updated_at: Mapped[dt.datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         default=lambda: dt.datetime.now(dt.UTC),
         onupdate=lambda: dt.datetime.now(dt.UTC),
     )
@@ -62,7 +68,7 @@ class ExceptionRecord(Base):
     resolution: Mapped[str | None] = mapped_column(String(16), nullable=True)
     correction: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime, default=lambda: dt.datetime.now(dt.UTC)
+        DateTime(timezone=True), default=lambda: dt.datetime.now(dt.UTC)
     )
 
 
