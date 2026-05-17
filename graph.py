@@ -14,15 +14,18 @@ This is scaffolding. Replace the TODOs with real implementations during build.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 from collections.abc import Iterator
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 from anthropic import AsyncAnthropic
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
+from pypdf import PdfReader
 
 from schemas import (
     ComplianceDisclosures,
@@ -64,20 +67,45 @@ class ExtractionState(BaseModel):
 # Node: ingest
 # ---------------------------------------------------------------------------
 
-def ingest_document(state: ExtractionState) -> ExtractionState:
-    """
-    Pull the PDF, extract text, rasterize pages.
+PDF_FETCH_TIMEOUT = float(os.getenv("PDF_FETCH_TIMEOUT", "30"))
+MIN_TEXT_LEN_PER_PAGE = int(os.getenv("MIN_TEXT_LEN_PER_PAGE", "50"))
 
-    Steps:
-      1. Fetch PDF bytes from state.pdf_url
-      2. Try pypdf for text-native extraction
-      3. For pages with empty/garbage text, rasterize to PNG and flag for vision
-      4. Upload page images to blob storage, store URLs in state.page_images
-      5. Persist raw text to state.raw_text
+
+async def _fetch_pdf(url: str) -> bytes:
+    async with httpx.AsyncClient(timeout=PDF_FETCH_TIMEOUT) as client:
+        resp = await client.get(url, follow_redirects=True)
+        resp.raise_for_status()
+        return resp.content
+
+
+async def ingest_document(state: ExtractionState) -> ExtractionState:
     """
-    # TODO: pypdf extraction
-    # TODO: page rasterization via pdf2image
-    # TODO: blob upload (Railway volume or S3)
+    Fetch the PDF, extract text per page via pypdf, flag low-text pages.
+
+    Pages with extracted text below MIN_TEXT_LEN_PER_PAGE are added to
+    state.pages_needing_vision for the extract node to handle via vision.
+    Page rasterization to PNG + blob upload is still TODO (needs poppler).
+    """
+    try:
+        pdf_bytes = await _fetch_pdf(state.pdf_url)
+    except httpx.HTTPError as exc:
+        state.error = f"Failed to fetch PDF: {exc}"
+        state.status = "ingest_failed"
+        return state
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    state.page_count = len(reader.pages)
+
+    page_texts: list[str] = []
+    pages_needing_vision: list[int] = []
+    for i, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        page_texts.append(f"[PAGE {i}]\n{text}")
+        if len(text.strip()) < MIN_TEXT_LEN_PER_PAGE:
+            pages_needing_vision.append(i)
+
+    state.raw_text = "\n\n".join(page_texts)
+    state.pages_needing_vision = pages_needing_vision
     state.status = "ingested"
     return state
 
