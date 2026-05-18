@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, Uuid
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, LargeBinary, String, Text, Uuid
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -40,6 +40,10 @@ class LeaseRecord(Base):
     pdf_url: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), index=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Persisted source PDF — used by GET /leases/{id}/pdf so the frontend's
+    # viewer works for upload-source leases (where the URL is upload://...
+    # and there's nothing public to fetch).
+    pdf_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     extraction: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(

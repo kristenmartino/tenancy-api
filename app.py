@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -236,6 +237,24 @@ async def upload_lease(
     await session.commit()
     bg.add_task(_run_pipeline, display_url, lease_id, pdf_bytes)
     return {"lease_id": str(lease_id), "status": "pending"}
+
+
+@app.get("/leases/{lease_id}/pdf")
+async def get_lease_pdf(lease_id: UUID, session: SessionDep) -> Response:
+    """Stream the source PDF bytes for the lease (if persisted)."""
+    lease = await session.get(LeaseRecord, lease_id)
+    if lease is None:
+        raise HTTPException(status_code=404, detail=f"Lease {lease_id} not found")
+    if lease.pdf_bytes is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Lease {lease_id} has no stored PDF bytes",
+        )
+    return Response(
+        content=lease.pdf_bytes,
+        media_type="application/pdf",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.post("/leases/{lease_id}/query")

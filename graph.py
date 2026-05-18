@@ -507,6 +507,8 @@ async def persist_results(state: ExtractionState) -> ExtractionState:
         lease.status = state.status if state.error else "complete"
         lease.raw_text = state.raw_text
         lease.error = state.error
+        if state.pdf_bytes is not None:
+            lease.pdf_bytes = state.pdf_bytes
         if state.extraction is not None:
             lease.extraction = state.extraction.model_dump(mode="json")
 
