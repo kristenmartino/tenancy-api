@@ -76,12 +76,20 @@ class ResolveRequest(BaseModel):
 # Serializers
 # ---------------------------------------------------------------------------
 
-def _lease_to_dict(lease: LeaseRecord, exception_count: int = 0) -> dict[str, Any]:
+def _lease_to_dict(
+    lease: LeaseRecord,
+    exception_count: int = 0,
+    *,
+    include_extraction: bool = True,
+) -> dict[str, Any]:
     return {
         "lease_id": str(lease.lease_id),
         "pdf_url": lease.pdf_url,
         "status": lease.status,
-        "extraction": lease.extraction,
+        # Extraction trees can run 50KB+ per lease. Excluded from list
+        # responses to keep that endpoint snappy under cold starts; the
+        # detail endpoint still returns the full payload.
+        "extraction": lease.extraction if include_extraction else None,
         "error": lease.error,
         "exception_count": exception_count,
         "created_at": lease.created_at.isoformat(),
@@ -136,7 +144,10 @@ async def list_leases(
         stmt = stmt.where(LeaseRecord.status == status)
     stmt = stmt.order_by(LeaseRecord.created_at.desc()).limit(limit)
     result = await session.execute(stmt)
-    return [_lease_to_dict(lease, count) for lease, count in result.all()]
+    return [
+        _lease_to_dict(lease, count, include_extraction=False)
+        for lease, count in result.all()
+    ]
 
 
 @app.get("/leases/{lease_id}")
