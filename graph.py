@@ -89,18 +89,22 @@ async def _fetch_pdf(url: str) -> bytes:
 
 async def ingest_document(state: ExtractionState) -> ExtractionState:
     """
-    Fetch the PDF, extract text per page via pypdf, flag low-text pages.
+    Fetch the PDF (or use pre-supplied bytes), parse it via pypdf, flag
+    low-text pages for vision fallback.
 
-    Pages with extracted text below MIN_TEXT_LEN_PER_PAGE are added to
-    state.pages_needing_vision for the extract node to handle via vision.
-    Page rasterization to PNG + blob upload is still TODO (needs poppler).
+    If state.pdf_bytes is already populated (e.g. from a file upload at the
+    API layer), the HTTP fetch is skipped — bytes come straight from the
+    request. Otherwise we fetch state.pdf_url.
     """
-    try:
-        pdf_bytes = await _fetch_pdf(state.pdf_url)
-    except (httpx.HTTPError, ValueError) as exc:
-        state.error = f"Failed to fetch PDF: {exc}"
-        state.status = "ingest_failed"
-        return state
+    if state.pdf_bytes is None:
+        try:
+            state.pdf_bytes = await _fetch_pdf(state.pdf_url)
+        except (httpx.HTTPError, ValueError) as exc:
+            state.error = f"Failed to fetch PDF: {exc}"
+            state.status = "ingest_failed"
+            return state
+
+    pdf_bytes = state.pdf_bytes
 
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -116,7 +120,6 @@ async def ingest_document(state: ExtractionState) -> ExtractionState:
 
         state.raw_text = "\n\n".join(page_texts)
         state.pages_needing_vision = pages_needing_vision
-        state.pdf_bytes = pdf_bytes  # retained for extract's vision fallback
         state.status = "ingested"
     except Exception as exc:  # noqa: BLE001 — node boundary: pypdf raises a zoo of types
         state.error = f"Failed to parse PDF: {type(exc).__name__}: {exc}"
@@ -550,8 +553,16 @@ def build_graph():
 
 
 # Convenience entrypoint for the API layer
-async def run_extraction(pdf_url: str, document_id: UUID | None = None) -> ExtractionState:
+async def run_extraction(
+    pdf_url: str,
+    document_id: UUID | None = None,
+    pdf_bytes: bytes | None = None,
+) -> ExtractionState:
     graph = build_graph()
-    initial = ExtractionState(document_id=document_id or uuid4(), pdf_url=pdf_url)
+    initial = ExtractionState(
+        document_id=document_id or uuid4(),
+        pdf_url=pdf_url,
+        pdf_bytes=pdf_bytes,
+    )
     final_state = await graph.ainvoke(initial)
     return ExtractionState.model_validate(final_state)

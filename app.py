@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -37,6 +37,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await init_db()
     yield
 
+
+MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", str(20 * 1024 * 1024)))  # 20 MiB
 
 app = FastAPI(lifespan=_lifespan, title="tenancy-api", version="0.1.0")
 
@@ -150,15 +152,22 @@ async def get_lease(lease_id: UUID, session: SessionDep) -> dict[str, Any]:
     return _lease_to_dict(lease, count_result.scalar_one())
 
 
-async def _run_pipeline(pdf_url: str, lease_id: UUID) -> None:
+async def _run_pipeline(
+    pdf_url: str,
+    lease_id: UUID,
+    pdf_bytes: bytes | None = None,
+) -> None:
     """Background task: run the extraction graph; persist_results writes to DB.
+
+    pdf_bytes is set when the source was an upload — ingest_document skips
+    the HTTP fetch and uses the provided bytes directly.
 
     Wrapped in try/except so any uncaught exception (pypdf crash, LLM
     timeout, OOM, Anthropic 5xx) marks the lease as pipeline_failed instead
     of leaving it stranded at 'pending' forever.
     """
     try:
-        await run_extraction(pdf_url, document_id=lease_id)
+        await run_extraction(pdf_url, document_id=lease_id, pdf_bytes=pdf_bytes)
     except Exception as exc:  # noqa: BLE001 — safety net for the whole graph
         async with AsyncSessionLocal() as session:
             lease = await session.get(LeaseRecord, lease_id)
@@ -183,6 +192,38 @@ async def create_lease(
     # parent INSERT and the exception rows would FK-violate.
     await session.commit()
     bg.add_task(_run_pipeline, req.pdf_url, lease_id)
+    return {"lease_id": str(lease_id), "status": "pending"}
+
+
+@app.post("/leases/upload", status_code=202)
+async def upload_lease(
+    bg: BackgroundTasks,
+    session: SessionDep,
+    file: Annotated[UploadFile, File(...)],
+) -> dict[str, str]:
+    """Multipart-upload alternative to POST /leases.
+
+    Accepts a PDF file directly so callers don't need to host it somewhere
+    publicly fetchable. Validates the magic bytes and a size cap before
+    dispatching the extraction pipeline.
+    """
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds max upload size ({MAX_UPLOAD_SIZE} bytes)",
+        )
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise HTTPException(
+            status_code=415,
+            detail="Uploaded file is not a PDF (missing %PDF- header)",
+        )
+
+    lease_id = uuid4()
+    display_url = f"upload://{file.filename or lease_id}"
+    session.add(LeaseRecord(lease_id=lease_id, pdf_url=display_url, status="pending"))
+    await session.commit()
+    bg.add_task(_run_pipeline, display_url, lease_id, pdf_bytes)
     return {"lease_id": str(lease_id), "status": "pending"}
 
 
