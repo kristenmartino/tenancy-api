@@ -1,0 +1,31 @@
+name: Keep services warm
+
+# Hits the Railway API /health endpoint every 5 minutes so the service stays
+# warm. Avoids cold-start latency that was occasionally tripping Vercel's
+# 10-second function timeout on the homepage's server-side fetch.
+#
+# GitHub Actions cron has a minimum 5-minute interval and may be delayed
+# during high load — perfect for a warm-up ping (best-effort by design).
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: # also allow manual trigger from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping Railway /health (with retries)
+        run: |
+          for i in 1 2 3; do
+            if curl -fsS --max-time 10 https://tenancy-api-production.up.railway.app/health; then
+              echo "  warm — attempt $i"
+              exit 0
+            fi
+            echo "attempt $i failed, retrying..."
+            sleep 5
+          done
+          echo "Failed to reach /health after 3 attempts"
+          exit 1
