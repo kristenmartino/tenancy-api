@@ -233,7 +233,17 @@ async def upload_lease(
 
     lease_id = uuid4()
     display_url = f"upload://{file.filename or lease_id}"
-    session.add(LeaseRecord(lease_id=lease_id, pdf_url=display_url, status="pending"))
+    # Persist bytes up-front (not waiting for persist_results) so GET
+    # /leases/{id}/pdf works the moment this returns — the frontend viewer
+    # can render the PDF while extraction is still pending.
+    session.add(
+        LeaseRecord(
+            lease_id=lease_id,
+            pdf_url=display_url,
+            status="pending",
+            pdf_bytes=pdf_bytes,
+        )
+    )
     await session.commit()
     bg.add_task(_run_pipeline, display_url, lease_id, pdf_bytes)
     return {"lease_id": str(lease_id), "status": "pending"}
