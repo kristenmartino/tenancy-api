@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db import ExceptionRecord, LeaseRecord, get_session, init_db
+from db import AsyncSessionLocal, ExceptionRecord, LeaseRecord, get_session, init_db
 from graph import run_extraction
 from qa import answer_question
 from schemas import ReviewAction
@@ -151,8 +151,21 @@ async def get_lease(lease_id: UUID, session: SessionDep) -> dict[str, Any]:
 
 
 async def _run_pipeline(pdf_url: str, lease_id: UUID) -> None:
-    """Background task: run the extraction graph; persist_results writes to DB."""
-    await run_extraction(pdf_url, document_id=lease_id)
+    """Background task: run the extraction graph; persist_results writes to DB.
+
+    Wrapped in try/except so any uncaught exception (pypdf crash, LLM
+    timeout, OOM, Anthropic 5xx) marks the lease as pipeline_failed instead
+    of leaving it stranded at 'pending' forever.
+    """
+    try:
+        await run_extraction(pdf_url, document_id=lease_id)
+    except Exception as exc:  # noqa: BLE001 — safety net for the whole graph
+        async with AsyncSessionLocal() as session:
+            lease = await session.get(LeaseRecord, lease_id)
+            if lease is not None:
+                lease.status = "pipeline_failed"
+                lease.error = f"Pipeline failed: {type(exc).__name__}: {exc}"
+                await session.commit()
 
 
 @app.post("/leases", status_code=202)

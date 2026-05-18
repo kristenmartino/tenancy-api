@@ -94,21 +94,25 @@ async def ingest_document(state: ExtractionState) -> ExtractionState:
         state.status = "ingest_failed"
         return state
 
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    state.page_count = len(reader.pages)
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        state.page_count = len(reader.pages)
 
-    page_texts: list[str] = []
-    pages_needing_vision: list[int] = []
-    for i, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
-        page_texts.append(f"[PAGE {i}]\n{text}")
-        if len(text.strip()) < MIN_TEXT_LEN_PER_PAGE:
-            pages_needing_vision.append(i)
+        page_texts: list[str] = []
+        pages_needing_vision: list[int] = []
+        for i, page in enumerate(reader.pages, start=1):
+            text = page.extract_text() or ""
+            page_texts.append(f"[PAGE {i}]\n{text}")
+            if len(text.strip()) < MIN_TEXT_LEN_PER_PAGE:
+                pages_needing_vision.append(i)
 
-    state.raw_text = "\n\n".join(page_texts)
-    state.pages_needing_vision = pages_needing_vision
-    state.pdf_bytes = pdf_bytes  # retained for extract's vision fallback
-    state.status = "ingested"
+        state.raw_text = "\n\n".join(page_texts)
+        state.pages_needing_vision = pages_needing_vision
+        state.pdf_bytes = pdf_bytes  # retained for extract's vision fallback
+        state.status = "ingested"
+    except Exception as exc:  # noqa: BLE001 — node boundary: pypdf raises a zoo of types
+        state.error = f"Failed to parse PDF: {type(exc).__name__}: {exc}"
+        state.status = "ingest_failed"
     return state
 
 
