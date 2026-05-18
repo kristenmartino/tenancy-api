@@ -76,6 +76,14 @@ async def _fetch_pdf(url: str) -> bytes:
     async with httpx.AsyncClient(timeout=PDF_FETCH_TIMEOUT) as client:
         resp = await client.get(url, follow_redirects=True)
         resp.raise_for_status()
+        ctype = resp.headers.get("content-type", "").lower()
+        if "pdf" not in ctype and not resp.content.startswith(b"%PDF-"):
+            preview = resp.content[:40].decode("utf-8", errors="replace")
+            raise ValueError(
+                f"URL returned {ctype or 'unknown content-type'}, not a PDF "
+                f"(first bytes: {preview!r}). The URL may be a login wall, "
+                f"an HTML error page, or a hotlink redirect."
+            )
         return resp.content
 
 
@@ -89,7 +97,7 @@ async def ingest_document(state: ExtractionState) -> ExtractionState:
     """
     try:
         pdf_bytes = await _fetch_pdf(state.pdf_url)
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         state.error = f"Failed to fetch PDF: {exc}"
         state.status = "ingest_failed"
         return state
