@@ -43,7 +43,11 @@ class LeaseRecord(Base):
     # Persisted source PDF — used by GET /leases/{id}/pdf so the frontend's
     # viewer works for upload-source leases (where the URL is upload://...
     # and there's nothing public to fetch).
-    pdf_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # deferred=True so list queries don't drag every PDF blob across the
+    # network. The /pdf endpoint explicitly undefers when it needs them.
+    pdf_bytes: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True, deferred=True
+    )
     extraction: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(

@@ -20,6 +20,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import undefer
 
 from db import AsyncSessionLocal, ExceptionRecord, LeaseRecord, get_session, init_db
 from graph import run_extraction
@@ -252,7 +253,14 @@ async def upload_lease(
 @app.get("/leases/{lease_id}/pdf")
 async def get_lease_pdf(lease_id: UUID, session: SessionDep) -> Response:
     """Stream the source PDF bytes for the lease (if persisted)."""
-    lease = await session.get(LeaseRecord, lease_id)
+    # Explicit undefer — pdf_bytes is deferred by default to keep list
+    # queries lean.
+    stmt = (
+        select(LeaseRecord)
+        .where(LeaseRecord.lease_id == lease_id)
+        .options(undefer(LeaseRecord.pdf_bytes))
+    )
+    lease = (await session.execute(stmt)).scalar_one_or_none()
     if lease is None:
         raise HTTPException(status_code=404, detail=f"Lease {lease_id} not found")
     if lease.pdf_bytes is None:
