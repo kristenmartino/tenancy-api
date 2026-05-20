@@ -16,7 +16,7 @@ from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field
 
 QA_MODEL = os.getenv("QA_MODEL", "claude-haiku-4-5-20251001")
-QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "1024"))
+QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "4096"))
 
 
 class Citation(BaseModel):

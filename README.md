@@ -112,7 +112,7 @@ Required:
 Optional:
 - `DATABASE_URL` — defaults to `sqlite+aiosqlite:///tenancy.db` for local dev. For Neon: `postgresql+asyncpg://user:pass@host/dbname?ssl=require` (asyncpg uses `ssl=`, not libpq's `sslmode=`).
 - `EXTRACT_MODEL`, `QA_MODEL`, `TEMPLATE_MODEL` — model overrides.
-- `EXTRACT_MAX_TOKENS`, `QA_MAX_TOKENS` — token caps per call.
+- `EXTRACT_MAX_TOKENS`, `QA_MAX_TOKENS` — token caps per call. `QA_MAX_TOKENS` defaults to 4096 so long answers (e.g. "list all flagged exceptions") fit the JSON envelope without truncating mid-string.
 - `PDF_FETCH_TIMEOUT` — seconds (default 30).
 - `MIN_TEXT_LEN_PER_PAGE` — pages below this much extracted text are flagged for vision fallback (default 50 chars).
 - `MAX_UPLOAD_SIZE` — bytes (default 20 MiB).
