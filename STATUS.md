@@ -1,23 +1,30 @@
 # Status
 
-> **Active focus:** verifying Path A (`ocrmypdf` preprocessing) actually works on Railway end-to-end. Pre-OCR, click-to-highlight in the PDF viewer worked for text-native PDFs but fell silently flat on scanned ones because PDF.js had no text-layer spans to tint. Just shipped `nixpacks.toml` declaring `tesseract` / `ghostscript` / `qpdf` system deps; need to confirm Railway's Nixpacks actually installs apt packages, then re-test that ingest → OCR → re-extract → click-to-highlight cleanly rounds out for a scanned PDF.
+> **Active focus:** strategic retreat on highlight precision + pivot to demo polish. Backend pipeline is solid (ingest → OCR → extract → validate → persist all working, deployed). Frontend extraction display + side-by-side PDF viewer working. The text-matching click-to-highlight was iterated 12+ times; shipped strict-match-only v1 so failures are silent and honest. Real fix is coordinate-based overlays driven by extraction-time bboxes — tracked as v2 (tenancy-api#16, tenancy#14) and v3 (tenancy-api#17). Now pivoting to ship the rest of Next 3: exception resolve UI + Q&A panel + demo video.
 
-> **Open question:** does Nixpacks `aptPkgs` work on Railway, or do we need to switch to a Dockerfile? Fallback exists (~10-line Dockerfile), unsure which will win.
+> **Open question:** none in flight. Highlight direction decided (strict v1 now, bbox overlay v2 next).
 
 ## Next 3
 
-1. **[#1]** Verify OCR deploy on Railway + re-test click-to-highlight on a scanned PDF (`effort-day`)
-2. **[#2]** Record 60-90s demo video for the case study on `kristenmartino.ai` (`effort-day`)
-3. **[#3]** Sketch commercial real-estate (CRE) lease schema — the next vertical from the README's market-expansion table (`effort-weeks`)
+1. **[tenancy#1]** Interactive exception resolve UI — approve/edit/reject buttons hitting `POST /exceptions/{id}/resolve` (`effort-day`)
+2. **[tenancy#2]** Q&A panel using the existing `/leases/{id}/query` endpoint (`effort-day`)
+3. **[#2]** Record 60-90s demo video for the case study (`effort-day`) — use text-native fillable PDF (San Antonio TAA) for the highlight demo, where the strict matcher works reliably
 
 ## Later
 
-Captured as `later`-labeled issues so they show up in `gh issue list` and on the Project board — won't get forgotten when the Next 3 churns. Promote to `next` when CRE (#3) lands or when a real prospect surfaces for one.
+Captured as `later`-labeled issues so they show up in `gh issue list` and on the Project board.
 
-- **[#5]** Vertical: government / public housing (HUD forms, FedRAMP)
-- **[#6]** Vertical: healthcare REITs (OIG flags, HIPAA-aligned audit trail)
-- **[#7]** Vertical: litigation / e-discovery (privilege detection, Bates, Relativity)
-- **[#8]** Vertical: EU operators (data residency, GDPR DSR support)
+**Verticals** (promote when CRE lands or a real prospect surfaces):
+- **[#5]** Government / public housing (HUD forms, FedRAMP)
+- **[#6]** Healthcare REITs (OIG flags, HIPAA-aligned audit trail)
+- **[#7]** Litigation / e-discovery (privilege detection, Bates, Relativity)
+- **[#8]** EU operators (data residency, GDPR DSR support)
+
+**Highlight precision roadmap** (the actual production architecture):
+- **[tenancy-api#16]** + **[tenancy#14]** — v2: extract `source.bbox` from Claude vision + render overlay rectangles in the frontend. Removes text matching entirely. ~80% accurate. (`next` once strict matcher demo'd)
+- **[tenancy-api#17]** — v3: AWS Textract for production-grade bbox accuracy (~99%). Promote when vision-bbox approach is the bottleneck or an AWS-friendly prospect surfaces.
+
+**[#3]** CRE schema sketch — first vertical expansion (`later` for now, was Next 3 — demoted while we get the residential demo cleanly shipped).
 
 Other Later candidates (not yet issues — would be premature):
 - Multi-tenant accounts + auth (gates everything productization-related)
@@ -27,20 +34,22 @@ Other Later candidates (not yet issues — would be premature):
 
 ## Blocked on
 
-- Railway deploy of commit `f4d65fd` going green with apt packages installed. Watching deploy logs.
+Nothing in flight.
 
 ## Recent decisions
 
-- **Path A over B / C** for the highlight-on-scans problem — `ocrmypdf` preprocessing chosen because it adds a hidden searchable text layer that the existing PDF.js highlight code uses unchanged. Trade-off: 3-5 min added to first Railway build, ~20-40s added to ingest of scanned PDFs. Path B (Textract for >99% bbox accuracy + per-page cost) and Path C (Claude vision bboxes for zero infra + ~70% accuracy) both punted.
-- **Repositioned README** around residential PM as wedge; market-expansion table sketches CRE, government, healthcare REITs, e-discovery, EU operators with what would change for each. Architecture framed as the portable thing.
-- **`pdf_bytes` column deferred** by default so list queries don't drag every PDF blob — was tripping Vercel cold-start function timeouts.
-- **Vision path = native Claude PDF document blocks**, not `pdf2image` + `poppler`. Lets us skip a system-deps headache for vision (though OCR brought it back for Path A).
+- **Strict highlight matcher v1** ([tenancy#13](https://github.com/kristenmartino/tenancy/pull/13)) — after 12+ heuristic iterations of fuzzy text matching, retreated to exact-normalized-match only. No fuzzy fallback. Silent failures preferred over wrong-place highlights. **The real fix is bbox overlays driven by extraction-time coordinates** (industry standard: Textract, Klippa, Rossum, Hyperscience all do this). Tracked as v2/v3 work above.
+- **Path A over B / C for OCR** — `ocrmypdf` preprocessing chosen because it adds a hidden searchable text layer that PDF.js can use. Verified working end-to-end on Railway.
+- **Cache-bust PDF URL + key re-mount on `updated_at` change** — fixed the "PDF stays 404 forever after pipeline completes" bug where `react-pdf` cached the initial 404.
+- **`pool_pre_ping=True` + DB-touching keep-warm cron** — fixed Neon idle-disconnect causing intermittent 500s on the homepage.
+- **Dockerfile over Nixpacks `aptPkgs`** — `nixpacks.toml` silently didn't install system deps on Railway; Dockerfile is explicit and works.
+- **Repositioned README** around residential PM as wedge; market-expansion table sketches CRE, government, healthcare REITs, e-discovery, EU operators with what would change for each.
+- **`pdf_bytes` column deferred** by default so list queries don't drag every PDF blob.
 - **`BackgroundTasks` safety net** in `_run_pipeline` so a pipeline crash marks the lease `pipeline_failed` instead of stranding at `pending`.
-- **GitHub Actions keep-warm cron** every 5 min to mitigate Railway cold starts that were tripping Vercel function timeouts.
 
 ## Velocity
 
-High right now (~30 commits in the last 48h shipping V0). Expected to ramp down once the OCR deploy verification lands and the demo video is recorded.
+Still high but settling. Backend is feature-complete for V0; frontend has two visible interactivity items left (exception resolve, Q&A panel) plus demo recording.
 
 ## Audience class
 
@@ -51,4 +60,4 @@ Portfolio / case study now. Productizing optional second phase if the demo lands
 - Backend + MCP: this repo (`kristenmartino/tenancy-api`)
 - Frontend: [`kristenmartino/tenancy`](https://github.com/kristenmartino/tenancy)
 
-Both deploy independently (Railway for backend, Vercel for frontend). STATUS.md and CLAUDE.md are mirrored to the frontend repo — velocity is high enough on both that orientation needs to work in either.
+Both deploy independently (Railway for backend, Vercel for frontend). STATUS.md and CLAUDE.md are mirrored to the frontend repo. Shared user-level Project board: https://github.com/users/kristenmartino/projects/2 — spans both repos so cross-repo deps (e.g. tenancy#14 ↔ tenancy-api#16 for v2 highlights) are visible in one view.
