@@ -261,12 +261,22 @@ async def get_lease_pdf(lease_id: UUID, session: SessionDep) -> Response:
         .options(undefer(LeaseRecord.pdf_bytes))
     )
     lease = (await session.execute(stmt)).scalar_one_or_none()
+    no_store = {"Cache-Control": "no-store"}
     if lease is None:
-        raise HTTPException(status_code=404, detail=f"Lease {lease_id} not found")
-    if lease.pdf_bytes is None:
-        raise HTTPException(
+        # no-store so a transient 404 (while a lease is still being created)
+        # doesn't get cached by the browser and shown forever
+        return Response(
+            content=f'{{"detail":"Lease {lease_id} not found"}}',
             status_code=404,
-            detail=f"Lease {lease_id} has no stored PDF bytes",
+            media_type="application/json",
+            headers=no_store,
+        )
+    if lease.pdf_bytes is None:
+        return Response(
+            content=f'{{"detail":"Lease {lease_id} has no stored PDF bytes"}}',
+            status_code=404,
+            media_type="application/json",
+            headers=no_store,
         )
     return Response(
         content=lease.pdf_bytes,
