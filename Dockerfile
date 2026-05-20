@@ -4,6 +4,12 @@
 
 FROM python:3.12-slim
 
+# Make print() / stderr show up in Railway logs in real-time instead of
+# being buffered indefinitely. Why we lost "[ocr] done" messages while
+# debugging Path A — OCR finished, but the buffered print never flushed
+# before the next event came in.
+ENV PYTHONUNBUFFERED=1
+
 # OCR system dependencies for ocrmypdf
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr \
