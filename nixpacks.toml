@@ -1,0 +1,12 @@
+# Nixpacks build config so Railway installs the system deps ocrmypdf needs.
+# These get apt-installed during the setup phase of the Docker build.
+
+[phases.setup]
+aptPkgs = [
+  "tesseract-ocr",       # OCR engine
+  "tesseract-ocr-eng",   # English language data
+  "ghostscript",         # PDF rasterization / manipulation
+  "qpdf",                # PDF linearization / repair
+  "unpaper",             # page cleanup (deskew, despeckle) — quality boost
+  "pngquant",            # PNG compression (optional but small)
+]

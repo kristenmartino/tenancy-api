@@ -70,6 +70,59 @@ class ExtractionState(BaseModel):
 
 PDF_FETCH_TIMEOUT = float(os.getenv("PDF_FETCH_TIMEOUT", "30"))
 MIN_TEXT_LEN_PER_PAGE = int(os.getenv("MIN_TEXT_LEN_PER_PAGE", "50"))
+OCR_ENABLED = os.getenv("OCR_ENABLED", "true").lower() in {"true", "1", "yes"}
+
+
+def _extract_text_per_page(pdf_bytes: bytes) -> tuple[str, list[int], int]:
+    """Return (joined raw_text, pages_needing_vision, page_count)."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    page_texts: list[str] = []
+    pages_needing_vision: list[int] = []
+    for i, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        page_texts.append(f"[PAGE {i}]\n{text}")
+        if len(text.strip()) < MIN_TEXT_LEN_PER_PAGE:
+            pages_needing_vision.append(i)
+    return "\n\n".join(page_texts), pages_needing_vision, len(reader.pages)
+
+
+def _run_ocrmypdf(pdf_bytes: bytes) -> bytes:
+    """Sync helper: write bytes, run ocrmypdf, read back. Heavy; call via to_thread."""
+    import contextlib
+    import tempfile
+    from pathlib import Path
+
+    import ocrmypdf
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as in_f:
+        in_f.write(pdf_bytes)
+        in_path = in_f.name
+    out_path = in_path.replace(".pdf", ".ocr.pdf")
+    try:
+        ocrmypdf.ocr(
+            in_path,
+            out_path,
+            skip_text=True,       # leave pages that already have text alone
+            optimize=0,            # skip image optimization for speed
+            progress_bar=False,
+            language="eng",
+            jobs=2,
+        )
+        return Path(out_path).read_bytes()
+    finally:
+        for p in (in_path, out_path):
+            with contextlib.suppress(OSError):
+                Path(p).unlink(missing_ok=True)
+
+
+async def _maybe_ocr(pdf_bytes: bytes, pages_needing_vision: list[int]) -> bytes:
+    """Run ocrmypdf if text extraction missed pages. No-op when OCR_ENABLED=false."""
+    if not OCR_ENABLED or not pages_needing_vision:
+        return pdf_bytes
+    try:
+        return await asyncio.to_thread(_run_ocrmypdf, pdf_bytes)
+    except Exception:  # noqa: BLE001 — OCR is best-effort; never fail ingest on its account
+        return pdf_bytes
 
 
 async def _fetch_pdf(url: str) -> bytes:
@@ -89,12 +142,17 @@ async def _fetch_pdf(url: str) -> bytes:
 
 async def ingest_document(state: ExtractionState) -> ExtractionState:
     """
-    Fetch the PDF (or use pre-supplied bytes), parse it via pypdf, flag
-    low-text pages for vision fallback.
+    Fetch the PDF (or use pre-supplied bytes), extract text via pypdf, and
+    OCR any image-only pages so PDF.js (and downstream extraction) can see
+    real text.
 
     If state.pdf_bytes is already populated (e.g. from a file upload at the
-    API layer), the HTTP fetch is skipped — bytes come straight from the
-    request. Otherwise we fetch state.pdf_url.
+    API layer), the HTTP fetch is skipped. Otherwise we fetch state.pdf_url.
+
+    OCR pass: when pypdf reports pages with insufficient text, we run the
+    bytes through ocrmypdf to add a hidden searchable text layer, then
+    re-extract. The OCR'd bytes replace state.pdf_bytes so the frontend
+    viewer can use the new text layer for click-to-highlight.
     """
     if state.pdf_bytes is None:
         try:
@@ -104,21 +162,23 @@ async def ingest_document(state: ExtractionState) -> ExtractionState:
             state.status = "ingest_failed"
             return state
 
-    pdf_bytes = state.pdf_bytes
-
     try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        state.page_count = len(reader.pages)
+        raw_text, pages_needing_vision, page_count = _extract_text_per_page(
+            state.pdf_bytes,
+        )
+        state.page_count = page_count
 
-        page_texts: list[str] = []
-        pages_needing_vision: list[int] = []
-        for i, page in enumerate(reader.pages, start=1):
-            text = page.extract_text() or ""
-            page_texts.append(f"[PAGE {i}]\n{text}")
-            if len(text.strip()) < MIN_TEXT_LEN_PER_PAGE:
-                pages_needing_vision.append(i)
+        if pages_needing_vision:
+            # Some pages are image-only — run OCR, then re-extract.
+            ocr_bytes = await _maybe_ocr(state.pdf_bytes, pages_needing_vision)
+            if ocr_bytes is not state.pdf_bytes:
+                state.pdf_bytes = ocr_bytes
+                raw_text, pages_needing_vision, page_count = _extract_text_per_page(
+                    ocr_bytes,
+                )
+                state.page_count = page_count
 
-        state.raw_text = "\n\n".join(page_texts)
+        state.raw_text = raw_text
         state.pages_needing_vision = pages_needing_vision
         state.status = "ingested"
     except Exception as exc:  # noqa: BLE001 — node boundary: pypdf raises a zoo of types
