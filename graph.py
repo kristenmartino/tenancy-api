@@ -278,6 +278,11 @@ TEMPLATE_DETECTION_MAX_CHARS = 4000
 # signatures without ballooning image-token cost (which grows ~quadratically
 # with DPI). Higher resolutions don't measurably improve the model's read.
 PAGE_RENDER_DPI = int(os.getenv("PAGE_RENDER_DPI", "150"))
+# Anthropic's many-image API caps each image at 2000 pixels on its longest
+# side. We send 9 section calls × N pages per lease, so every render is a
+# many-image request. Anything larger 400s the whole extraction. Letter at
+# 150 DPI fits comfortably; legal / A3 / oversized scans do not.
+MAX_IMAGE_DIM_PX = int(os.getenv("MAX_IMAGE_DIM_PX", "1950"))
 
 
 TEMPLATE_DETECTION_PROMPT = """Classify the following residential lease excerpt as one of these templates:
@@ -305,10 +310,16 @@ def _render_pages_to_pngs(pdf_bytes: bytes, dpi: int = PAGE_RENDER_DPI) -> list[
     import pypdfium2 as pdfium
 
     pdf = pdfium.PdfDocument(pdf_bytes)
-    scale = dpi / 72  # PDF user-space unit is 1/72 inch
+    target_scale = dpi / 72  # PDF user-space unit is 1/72 inch
     pngs: list[bytes] = []
     try:
         for page in pdf:
+            # Cap render so the longest side stays under Anthropic's
+            # 2000-pixel many-image limit. max(w, h) is rotation-invariant
+            # so this works for portrait, landscape, and rotated pages.
+            page_w, page_h = page.get_size()
+            longest_pt = max(page_w, page_h)
+            scale = min(target_scale, MAX_IMAGE_DIM_PX / longest_pt)
             bitmap = page.render(scale=scale)
             pil = bitmap.to_pil()
             buf = io.BytesIO()
