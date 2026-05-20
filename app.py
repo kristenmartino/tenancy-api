@@ -8,6 +8,7 @@ background task so POST /leases returns 202 immediately.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,9 +19,10 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Uplo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
+from sqlalchemy.orm.attributes import flag_modified
 
 from db import AsyncSessionLocal, ExceptionRecord, LeaseRecord, get_session, init_db
 from graph import run_extraction
@@ -69,9 +71,14 @@ class QueryRequest(BaseModel):
     question: str
 
 
+class Correction(BaseModel):
+    value: Any
+    note: str | None = None
+
+
 class ResolveRequest(BaseModel):
     action: str
-    correction: dict[str, Any] | None = None
+    correction: Correction | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +90,7 @@ def _lease_to_dict(
     exception_count: int = 0,
     *,
     include_extraction: bool = True,
+    blocking_open_count: int = 0,
 ) -> dict[str, Any]:
     return {
         "lease_id": str(lease.lease_id),
@@ -94,6 +102,12 @@ def _lease_to_dict(
         "extraction": lease.extraction if include_extraction else None,
         "error": lease.error,
         "exception_count": exception_count,
+        # True iff extraction completed AND no blocking exception remains
+        # unresolved-or-rejected. approve/edit clear a blocking flag; reject
+        # keeps it material so the reviewer can refuse to bless the field.
+        "ready_to_proceed": (
+            lease.status == "complete" and blocking_open_count == 0
+        ),
         "created_at": lease.created_at.isoformat(),
         "updated_at": lease.updated_at.isoformat(),
     }
@@ -128,6 +142,18 @@ async def health() -> dict[str, str]:
 # Leases
 # ---------------------------------------------------------------------------
 
+def _blocking_open_predicate() -> Any:
+    """SQL predicate matching exceptions that still block the lease.
+
+    Blocking-and-unresolved OR blocking-rejected. `reject` keeps the flag
+    material — "I won't bless this field" — so the lease stays unready.
+    """
+    return (ExceptionRecord.severity == "blocking") & or_(
+        ExceptionRecord.resolved.is_(False),
+        ExceptionRecord.resolution == "reject",
+    )
+
+
 @app.get("/leases")
 async def list_leases(
     session: SessionDep,
@@ -141,14 +167,30 @@ async def list_leases(
         .correlate(LeaseRecord)
         .scalar_subquery()
     )
-    stmt = select(LeaseRecord, count_sq.label("exc_count"))
+    blocking_sq = (
+        select(func.count(ExceptionRecord.exception_id))
+        .where(ExceptionRecord.lease_id == LeaseRecord.lease_id)
+        .where(_blocking_open_predicate())
+        .correlate(LeaseRecord)
+        .scalar_subquery()
+    )
+    stmt = select(
+        LeaseRecord,
+        count_sq.label("exc_count"),
+        blocking_sq.label("blk_count"),
+    )
     if status:
         stmt = stmt.where(LeaseRecord.status == status)
     stmt = stmt.order_by(LeaseRecord.created_at.desc()).limit(limit)
     result = await session.execute(stmt)
     return [
-        _lease_to_dict(lease, count, include_extraction=False)
-        for lease, count in result.all()
+        _lease_to_dict(
+            lease,
+            count,
+            include_extraction=False,
+            blocking_open_count=blk_count,
+        )
+        for lease, count, blk_count in result.all()
     ]
 
 
@@ -162,7 +204,16 @@ async def get_lease(lease_id: UUID, session: SessionDep) -> dict[str, Any]:
         .where(ExceptionRecord.lease_id == lease_id)
         .where(ExceptionRecord.resolved.is_(False))
     )
-    return _lease_to_dict(lease, count_result.scalar_one())
+    blocking_result = await session.execute(
+        select(func.count(ExceptionRecord.exception_id))
+        .where(ExceptionRecord.lease_id == lease_id)
+        .where(_blocking_open_predicate())
+    )
+    return _lease_to_dict(
+        lease,
+        count_result.scalar_one(),
+        blocking_open_count=blocking_result.scalar_one(),
+    )
 
 
 async def _run_pipeline(
@@ -329,6 +380,41 @@ async def list_exceptions(
     return [_exception_to_dict(e) for e in result.scalars().all()]
 
 
+# Walks `parties[0].name` → ["parties", "0", "name"]. Filters out the empty
+# strings re.split produces around the bracket delimiters.
+_FIELD_PATH_TOKEN = re.compile(r"\.|\[|\]")
+
+
+def _apply_correction(
+    extraction: dict[str, Any], field_path: str, new_value: Any
+) -> None:
+    """Walk `extraction` to `field_path` and rewrite the leaf ExtractedField.
+
+    Replaces `.value` with `new_value` and bumps `.confidence` to 1.0 (a
+    human said so). Leaves `source` and `notes` intact — the citation still
+    points at the same span the model was looking at.
+
+    Raises ValueError if the path doesn't resolve to a leaf with a `value`
+    key (e.g. `field_path="parties"` when the issue is "no parties at all"
+    — that's not editable through this endpoint, use a different flow).
+    """
+    parts = [p for p in _FIELD_PATH_TOKEN.split(field_path) if p]
+    node: Any = extraction
+    for part in parts:
+        try:
+            node = node[int(part)] if part.isdigit() else node[part]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError(
+                f"field_path {field_path!r} not resolvable in extraction"
+            ) from exc
+    if not isinstance(node, dict) or "value" not in node:
+        raise ValueError(
+            f"field_path {field_path!r} did not resolve to a leaf ExtractedField"
+        )
+    node["value"] = new_value
+    node["confidence"] = 1.0
+
+
 @app.post("/exceptions/{exception_id}/resolve")
 async def resolve_exception(
     exception_id: UUID,
@@ -342,8 +428,24 @@ async def resolve_exception(
         raise HTTPException(status_code=400, detail=f"Invalid action: {req.action}")
     if req.action == "edit" and req.correction is None:
         raise HTTPException(status_code=400, detail="correction required when action='edit'")
+
+    if req.action == "edit":
+        lease = await session.get(LeaseRecord, exc.lease_id)
+        if lease is None or lease.extraction is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot edit: lease {exc.lease_id} has no extraction yet",
+            )
+        try:
+            _apply_correction(lease.extraction, exc.field_path, req.correction.value)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        # SQLAlchemy doesn't track in-place mutations of JSON columns; mark
+        # the attribute dirty so the UPDATE fires.
+        flag_modified(lease, "extraction")
+
     exc.resolved = True
     exc.resolution = ReviewAction(req.action).value
-    exc.correction = req.correction
+    exc.correction = req.correction.model_dump() if req.correction else None
     await session.commit()
     return _exception_to_dict(exc)

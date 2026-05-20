@@ -152,9 +152,19 @@ Each field is wrapped in `ExtractedField[T]` which carries `value`, `confidence`
 | `extract_lease(pdf_url)` | Trigger extraction on a new document |
 | `query_lease(lease_id, question)` | Natural-language Q&A over a single lease |
 | `list_exceptions(lease_id=None)` | Pending human-review items |
-| `resolve_exception(exception_id, action, correction=None)` | Approve / edit / reject |
+| `resolve_exception(exception_id, action, correction=None)` | Approve / edit / reject — see semantics below |
 
 The Claude Desktop demo: *"Show me all leases expiring in the next 12 months and flag any with early termination clauses."* Claude calls `list_leases` + `get_lease` and reasons over structured fields with source citations.
+
+### Resolve semantics
+
+`POST /exceptions/{id}/resolve` accepts `{action, correction?}` where `action ∈ {approve, edit, reject}` and `correction` is `{value, note?}` (required when `action == "edit"`).
+
+- **edit** — `lease.extraction` is rewritten at the exception's `field_path`: the leaf `ExtractedField.value` is replaced with `correction.value` and `confidence` is bumped to `1.0` (a human said so). The blocker clears and the lease becomes ready.
+- **approve** — accept the current state as-is (possibly blank). The exception clears; the blocker clears. *"I accept the gap."*
+- **reject** — exception row closes for audit, but the blocking flag stays material. The lease does **not** become ready. *"I won't bless this field."*
+
+Lease responses include `ready_to_proceed: bool`, derived as `status == "complete"` AND no blocking exception is unresolved-or-rejected.
 
 ### Wiring it into Claude Desktop
 
