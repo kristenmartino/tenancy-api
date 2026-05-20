@@ -18,12 +18,38 @@ from pydantic import BaseModel, Field
 # Provenance wrapper
 # ---------------------------------------------------------------------------
 
+class BoundingBox(BaseModel):
+    """Normalized (0.0-1.0) page coordinates of an extracted field's location.
+
+    All four values are fractions of the page's width / height — so the same
+    schema works regardless of render resolution. (x, y) is the top-left
+    corner. Origin is the top-left of the page.
+
+    Set by Sonnet vision during extraction. Used by the frontend's PDF viewer
+    to draw overlay rectangles at exact pixel coords (computed as
+    bbox.x * canvasWidth, etc.) — replaces text-layer substring matching
+    for click-to-highlight.
+    """
+    x: float = Field(..., ge=0.0, le=1.0)
+    y: float = Field(..., ge=0.0, le=1.0)
+    width: float = Field(..., gt=0.0, le=1.0)
+    height: float = Field(..., gt=0.0, le=1.0)
+
+
 class SourceSpan(BaseModel):
     """Where in the source PDF this field was extracted from."""
     page_number: int = Field(..., ge=1, description="1-indexed page number")
     char_start: int = Field(..., ge=0, description="Character offset on page")
     char_end: int = Field(..., ge=0, description="Character offset on page")
     snippet: str = Field(..., description="Verbatim text supporting the extraction")
+    bbox: BoundingBox | None = Field(
+        default=None,
+        description=(
+            "Normalized page coordinates of the field's source location. "
+            "Optional — older extractions don't have this; falls back to "
+            "text-layer matching in the frontend viewer."
+        ),
+    )
 
 
 class ExtractedField[T](BaseModel):

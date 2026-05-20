@@ -226,11 +226,22 @@ The lease text follows the document boundary marker. Extract the specified secti
 and return ONLY a JSON object matching the schema. Every field must include:
   - value: the extracted value (or null if not present)
   - confidence: 0.0 to 1.0, your honest confidence
-  - source: {page_number, char_start, char_end, snippet} pointing to verbatim text
+  - source: {page_number, char_start, char_end, snippet, bbox} pointing to the
+            location in the document:
+            * page_number: 1-indexed
+            * char_start/char_end: character offsets on that page
+            * snippet: verbatim text supporting the extraction
+            * bbox: {x, y, width, height} as fractions (0.0-1.0) of the page's
+                    width/height, with (x, y) at the top-left of the rectangle
+                    that visually contains the supporting text. Origin is the
+                    page's top-left. Be as tight as you reasonably can — bound
+                    just the line(s) containing the value, not the whole
+                    paragraph. If the field is null because the document
+                    doesn't say it, set bbox to null too.
   - notes: optional, only if ambiguity needs flagging
 
 Do not hallucinate. If a field is not stated in the document, set value to null and
-confidence to 1.0 (you are confident it is absent).
+confidence to 1.0 (you are confident it is absent). bbox is null in that case.
 
 Schema for this section:
 {schema}
