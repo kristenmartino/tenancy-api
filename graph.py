@@ -103,11 +103,15 @@ def _run_ocrmypdf(pdf_bytes: bytes) -> bytes:
         ocrmypdf.ocr(
             in_path,
             out_path,
-            skip_text=True,       # leave pages that already have text alone
-            optimize=0,            # skip image optimization for speed
+            skip_text=True,            # leave pages that already have text alone
+            optimize=0,                 # skip image optimization for speed
             progress_bar=False,
             language="eng",
             jobs=2,
+            output_type="pdf",          # plain PDF (not PDF/A) — PDF.js's
+                                        # text-layer renderer is more reliable
+                                        # against vanilla PDFs than the
+                                        # default PDF/A output
         )
         return Path(out_path).read_bytes()
     finally:
