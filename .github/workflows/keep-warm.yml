@@ -17,15 +17,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Ping Railway /health (with retries)
+      - name: Ping Railway /leases (with retries)
+        # /leases exercises the DB connection pool, not just the web process —
+        # keeps Neon's pooler warm so the first user request after an idle
+        # period doesn't hit a dead connection. /health alone wasn't enough
+        # because it doesn't touch the DB.
         run: |
           for i in 1 2 3; do
-            if curl -fsS --max-time 10 https://tenancy-api-production.up.railway.app/health; then
+            if curl -fsS --max-time 15 https://tenancy-api-production.up.railway.app/leases > /dev/null; then
               echo "  warm — attempt $i"
               exit 0
             fi
             echo "attempt $i failed, retrying..."
             sleep 5
           done
-          echo "Failed to reach /health after 3 attempts"
+          echo "Failed to reach /leases after 3 attempts"
           exit 1
