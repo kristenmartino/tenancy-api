@@ -248,15 +248,34 @@ Every field must include:
             * snippet: verbatim text supporting the extraction
             * bbox: {x, y, width, height} as fractions (0.0-1.0) of the page's
                     width/height, with (x, y) at the top-left of the rectangle
-                    that visually contains the supporting text. Origin is the
-                    page's top-left. Be as tight as you reasonably can — bound
-                    just the line(s) containing the value, not the whole
-                    paragraph. If the field is null because the document
-                    doesn't say it, set bbox to null too.
+                    that visually contains the field. Origin is the page's
+                    top-left. Tightness rules (apply in order):
+                    1. If value is a FILLED IN string/date/number: bound just
+                       the visible characters of the VALUE — not the section
+                       label, not the leading intro text, not the paragraph the
+                       value sits in. Just the value glyphs.
+                    2. If the field is a CHECKBOX or enum decided from a visual
+                       mark (checked box, empty box, X, hand-fill, slash):
+                       bound BOTH the box glyph AND its immediately adjacent
+                       label text ("electric", "gas", "lead paint disclosure")
+                       as one rectangle. Do this whether the box is checked or
+                       empty — the empty box plus its label is what the human
+                       reviewer needs to see.
+                    3. If value is null because the document has a VISIBLE
+                       BLANK PLACEHOLDER for it (an underline, empty parens, a
+                       labeled but unfilled space — e.g. "day of (month)" with
+                       nothing written in, "$_____ per month" with no amount):
+                       bound the blank placeholder itself plus the label that
+                       describes it. NOT the section header above. NOT the
+                       paragraph around it.
+                    4. If value is null AND there is no visible placeholder at
+                       all (the document simply doesn't mention this field):
+                       set bbox to null.
   - notes: optional, only if ambiguity needs flagging
 
 Do not hallucinate. If a field is not stated in the document, set value to null and
-confidence to 1.0 (you are confident it is absent). bbox is null in that case.
+confidence to 1.0 (you are confident it is absent). Follow the bbox tightness rules
+above for how to localize (or null out) the bbox in that case.
 
 Schema for this section:
 {schema}
