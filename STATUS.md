@@ -1,14 +1,14 @@
 # Status
 
-> **Active focus:** strategic retreat on highlight precision + pivot to demo polish. Backend pipeline is solid (ingest → OCR → extract → validate → persist all working, deployed). Frontend extraction display + side-by-side PDF viewer working. The text-matching click-to-highlight was iterated 12+ times; shipped strict-match-only v1 so failures are silent and honest. Real fix is coordinate-based overlays driven by extraction-time bboxes — tracked as v2 (tenancy-api#16, tenancy#14) and v3 (tenancy-api#17). Now pivoting to ship the rest of Next 3: exception resolve UI + Q&A panel + demo video.
+> **Active focus:** strategic retreat on highlight precision + pivot to demo polish. Backend pipeline is solid (ingest → OCR → extract → validate → persist all working, deployed). Frontend extraction display + side-by-side PDF viewer working. The text-matching click-to-highlight was iterated 12+ times; shipped strict-match-only v1 so failures are silent and honest. Real fix is coordinate-based overlays driven by extraction-time bboxes — tracked as v2 (tenancy-api#16, tenancy#14) and v3 (tenancy-api#17). Resolve UI + Q&A panel both shipped (resolve semantics: tenancy-api#22). Demo video is the last residential-demo polish item; after that, v2 bbox highlights and the CRE schema sketch come off the Later shelf.
 
 > **Open question:** none in flight. Highlight direction decided (strict v1 now, bbox overlay v2 next).
 
 ## Next 3
 
-1. **[tenancy#1]** Interactive exception resolve UI — approve/edit/reject buttons hitting `POST /exceptions/{id}/resolve` (`effort-day`). Backend semantics landed in [tenancy-api#22](https://github.com/kristenmartino/tenancy-api/issues/22): `edit` rewrites the extraction, derived `ready_to_proceed` flag, `reject` keeps the blocker material so the three actions are actually distinct.
-2. **[tenancy#2]** Q&A panel using the existing `/leases/{id}/query` endpoint (`effort-day`)
-3. **[#2]** Record 60-90s demo video for the case study (`effort-day`) — use text-native fillable PDF (San Antonio TAA) for the highlight demo, where the strict matcher works reliably
+1. **[#2]** Record 60-90s demo video for the case study (`effort-day`) — use text-native fillable PDF (San Antonio TAA) for the highlight demo, where the strict matcher works reliably
+2. **[tenancy-api#16]** + **[tenancy#14]** v2 bbox highlight overlay — extract `source.bbox` from Claude vision + render overlay rectangles in the frontend. Removes text matching entirely. ~80% accurate. (`effort-week`)
+3. **[#3]** Sketch commercial real-estate (CRE) lease schema — first vertical expansion (`effort-weeks`)
 
 ## Later
 
@@ -21,10 +21,8 @@ Captured as `later`-labeled issues so they show up in `gh issue list` and on the
 - **[#8]** EU operators (data residency, GDPR DSR support)
 
 **Highlight precision roadmap** (the actual production architecture):
-- **[tenancy-api#16]** + **[tenancy#14]** — v2: extract `source.bbox` from Claude vision + render overlay rectangles in the frontend. Removes text matching entirely. ~80% accurate. (`next` once strict matcher demo'd)
+- v2 promoted to Next 3 above.
 - **[tenancy-api#17]** — v3: AWS Textract for production-grade bbox accuracy (~99%). Promote when vision-bbox approach is the bottleneck or an AWS-friendly prospect surfaces.
-
-**[#3]** CRE schema sketch — first vertical expansion (`later` for now, was Next 3 — demoted while we get the residential demo cleanly shipped).
 
 Other Later candidates (not yet issues — would be premature):
 - Multi-tenant accounts + auth (gates everything productization-related)
@@ -52,7 +50,7 @@ Nothing in flight.
 
 ## Velocity
 
-Still high but settling. Backend is feature-complete for V0; frontend has two visible interactivity items left (exception resolve, Q&A panel) plus demo recording.
+Still high but settling. Backend feature-complete for V0; frontend interactivity complete (resolve + Q&A both shipped). Only demo recording left before the residential V0 is fully closed out.
 
 ## Audience class
 
