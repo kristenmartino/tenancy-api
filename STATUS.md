@@ -10,6 +10,21 @@
 2. **[#2]** Record 60-90s demo video for the case study on `kristenmartino.ai` (`effort-day`)
 3. **[#3]** Sketch commercial real-estate (CRE) lease schema — the next vertical from the README's market-expansion table (`effort-weeks`)
 
+## Later
+
+Captured as `later`-labeled issues so they show up in `gh issue list` and on the Project board — won't get forgotten when the Next 3 churns. Promote to `next` when CRE (#3) lands or when a real prospect surfaces for one.
+
+- **[#5]** Vertical: government / public housing (HUD forms, FedRAMP)
+- **[#6]** Vertical: healthcare REITs (OIG flags, HIPAA-aligned audit trail)
+- **[#7]** Vertical: litigation / e-discovery (privilege detection, Bates, Relativity)
+- **[#8]** Vertical: EU operators (data residency, GDPR DSR support)
+
+Other Later candidates (not yet issues — would be premature):
+- Multi-tenant accounts + auth (gates everything productization-related)
+- Closed-loop feedback so human corrections from the review queue feed back into extraction prompts
+- Real eval set + measured accuracy (depends on the feedback loop above)
+- Re-extraction diff view in the UI
+
 ## Blocked on
 
 - Railway deploy of commit `f4d65fd` going green with apt packages installed. Watching deploy logs.
@@ -36,4 +51,4 @@ Portfolio / case study now. Productizing optional second phase if the demo lands
 - Backend + MCP: this repo (`kristenmartino/tenancy-api`)
 - Frontend: [`kristenmartino/tenancy`](https://github.com/kristenmartino/tenancy)
 
-Both deploy independently (Railway for backend, Vercel for frontend). STATUS.md and CLAUDE.md will be mirrored to the frontend repo if it stays this active.
+Both deploy independently (Railway for backend, Vercel for frontend). STATUS.md and CLAUDE.md are mirrored to the frontend repo — velocity is high enough on both that orientation needs to work in either.
