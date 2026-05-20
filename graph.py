@@ -222,8 +222,23 @@ async def ingest_document(state: ExtractionState) -> ExtractionState:
 
 EXTRACTION_PROMPT = """You are extracting structured data from a residential lease agreement.
 
-The lease text follows the document boundary marker. Extract the specified section
-and return ONLY a JSON object matching the schema. Every field must include:
+You are given two views of the lease:
+  1. Page images — one per page, rendered from the source PDF.
+  2. OCR'd text — the lease text, after the document boundary marker.
+
+How to use them together:
+  - For dense text fields (parties, addresses, dates, dollar amounts, written
+    clauses), prefer the OCR'd text. It is exact at the character level.
+  - For visual fields (checkboxes, signatures, initials, X marks, hand-filled
+    marks, presence/absence of stamps), ALWAYS decide from the page image, NOT
+    from the OCR text. Tesseract (the OCR engine) routinely reads ink bleed,
+    print/scan artifacts, and stray pixels as characters or marks — a checkbox
+    with a slightly thicker top border can OCR as a checked box even when it
+    is visibly empty. The pixels are the ground truth for whether a box is
+    checked, a signature is present, or an initial line is filled.
+
+Extract the specified section and return ONLY a JSON object matching the schema.
+Every field must include:
   - value: the extracted value (or null if not present)
   - confidence: 0.0 to 1.0, your honest confidence
   - source: {page_number, char_start, char_end, snippet, bbox} pointing to the
@@ -258,6 +273,11 @@ EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "claude-sonnet-4-6")
 EXTRACT_MAX_TOKENS = int(os.getenv("EXTRACT_MAX_TOKENS", "4096"))
 TEMPLATE_MODEL = os.getenv("TEMPLATE_MODEL", "claude-haiku-4-5-20251001")
 TEMPLATE_DETECTION_MAX_CHARS = 4000
+# Resolution for the page-image render passed to the extraction call.
+# 150 DPI ≈ 1275x1650 for a letter-sized page — legible for checkboxes /
+# signatures without ballooning image-token cost (which grows ~quadratically
+# with DPI). Higher resolutions don't measurably improve the model's read.
+PAGE_RENDER_DPI = int(os.getenv("PAGE_RENDER_DPI", "150"))
 
 
 TEMPLATE_DETECTION_PROMPT = """Classify the following residential lease excerpt as one of these templates:
@@ -272,6 +292,36 @@ Return ONLY the lowercase template code. No preamble, no explanation.
 
 Lease excerpt:
 {excerpt}"""
+
+
+def _render_pages_to_pngs(pdf_bytes: bytes, dpi: int = PAGE_RENDER_DPI) -> list[bytes]:
+    """Render every page of the PDF to a PNG. Sync; call via to_thread.
+
+    Used to attach visual context to the extraction call so the model can
+    ground checkbox / signature / hand-fill fields in pixels rather than in
+    OCR character classification (Tesseract over-reads ink bleed and stray
+    pixels as marks, producing false-positive checked boxes).
+    """
+    import pypdfium2 as pdfium
+
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    scale = dpi / 72  # PDF user-space unit is 1/72 inch
+    pngs: list[bytes] = []
+    try:
+        for page in pdf:
+            bitmap = page.render(scale=scale)
+            pil = bitmap.to_pil()
+            buf = io.BytesIO()
+            pil.save(buf, format="PNG")
+            pngs.append(buf.getvalue())
+    finally:
+        pdf.close()
+    return pngs
+
+
+async def _render_pages(pdf_bytes: bytes) -> list[bytes]:
+    """Async wrapper — runs CPU-bound pdfium render off the event loop."""
+    return await asyncio.to_thread(_render_pages_to_pngs, pdf_bytes)
 
 
 async def _detect_template(client: AsyncAnthropic, text: str) -> LeaseTemplate:
@@ -330,27 +380,31 @@ async def _extract_section(
     client: AsyncAnthropic,
     schema_class: type[BaseModel],
     document: str,
-    pdf_bytes: bytes | None = None,
+    page_images: list[bytes] | None = None,
 ) -> BaseModel:
     """Call the LLM for one section; parse, validate, return.
 
-    When pdf_bytes is provided, attach the raw PDF as a document block so the
-    model can use vision for content where text extraction was incomplete.
+    When page_images is provided, each PNG is attached as an image block
+    ahead of the prompt so the model can ground visual fields (checkboxes,
+    signatures, hand-fill) in pixels rather than in OCR character output.
+    The OCR'd text stays in the prompt for character-level accuracy on
+    dense text — the two are complementary.
     """
     prompt = _build_prompt(schema_class.model_json_schema(), document)
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    if pdf_bytes:
-        content.insert(
-            0,
-            {
-                "type": "document",
-                "source": {
-                    "type": "base64",
-                    "media_type": "application/pdf",
-                    "data": base64.b64encode(pdf_bytes).decode(),
-                },
-            },
-        )
+    content: list[dict[str, Any]] = []
+    if page_images:
+        for png in page_images:
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": base64.b64encode(png).decode(),
+                    },
+                }
+            )
+    content.append({"type": "text", "text": prompt})
     response = await client.messages.create(
         model=EXTRACT_MODEL,
         max_tokens=EXTRACT_MAX_TOKENS,
@@ -369,7 +423,11 @@ async def extract_fields(
     """
     Call Claude per section, in parallel, to populate the LeaseExtraction model.
 
-    Vision support for pages_needing_vision is not yet implemented — text-only.
+    Each section call attaches every page rendered as a PNG image block, so the
+    model can ground visual fields (checkboxes, signatures, hand-fill) in pixels
+    instead of trusting OCR character classification. OCR text stays in the
+    prompt for dense text — they're complementary.
+
     The optional client parameter exists for dependency injection in tests.
     """
     if state.error:
@@ -382,14 +440,25 @@ async def extract_fields(
         client = AsyncAnthropic()
 
     try:
-        # Attach the raw PDF for vision fallback when text extraction was
-        # incomplete on any page. Costs more tokens (PDF sent per section)
-        # but unlocks scanned-PDF support without poppler / blob storage.
-        pdf_bytes = state.pdf_bytes if state.pages_needing_vision else None
+        # Render every page to a PNG once and reuse across the 9 section calls.
+        # Costs more image tokens (sent per section) but unlocks visual
+        # grounding so the model doesn't trust noisy OCR reads for checkboxes
+        # / signatures / hand-fill. Render failures are best-effort: fall back
+        # to text-only rather than failing the whole extraction.
+        page_images: list[bytes] | None = None
+        if state.pdf_bytes is not None:
+            try:
+                page_images = await _render_pages(state.pdf_bytes)
+            except Exception as exc:  # noqa: BLE001 — best-effort; never fail extraction over render
+                print(
+                    f"[render] FAILED ({type(exc).__name__}): {exc} — "
+                    f"extraction will run text-only",
+                    file=sys.stderr,
+                )
 
         template_task = asyncio.create_task(_detect_template(client, state.raw_text))
         section_tasks = [
-            _extract_section(client, model, state.raw_text, pdf_bytes)
+            _extract_section(client, model, state.raw_text, page_images)
             for model in SECTION_MODELS.values()
         ]
         section_results = await asyncio.gather(*section_tasks)

@@ -45,7 +45,7 @@ Why this market first:
 ## What it does
 
 1. **Ingest** — accepts a residential lease PDF (TAA, NAA, or state template) via URL or direct upload. Pulls text with pypdf. Flags low-text pages for vision fallback.
-2. **Extract** — LangGraph agent calls Claude Sonnet 4.6 across nine sections in parallel (parties, property, term, rent, deposits, utilities, pets, special clauses, compliance). For scanned pages, the raw PDF is attached as a document block so Claude vision handles content the text extractor missed. Every field carries `value`, `confidence`, and a source span. Claude Haiku 4.5 runs in parallel to classify the lease against the template enum.
+2. **Extract** — LangGraph agent calls Claude Sonnet 4.6 across nine sections in parallel (parties, property, term, rent, deposits, utilities, pets, special clauses, compliance). Each call attaches every page rendered as a PNG (via `pypdfium2`, ~150 DPI) alongside the OCR'd text — the model grounds visual fields (checkboxes, signatures, X marks, hand-fill) in pixels and uses OCR for character-exact dense text (parties, addresses, dollar amounts). This avoids the OCR-noise → false-positive-checkbox class of bug, where Tesseract reads a scan artifact as a stray mark. Every field carries `value`, `confidence`, and a source span. Claude Haiku 4.5 runs in parallel to classify the lease against the template enum.
 3. **Validate** — seven deterministic rules (date consistency, rent math, deposit-cap heuristic, late-fee/grace-period pairing, lead-paint disclosure presence, required-but-null check, and a recursive low-confidence sweep) emit `LeaseException` rows with severity (`BLOCKING`, `WARNING`, `INFORMATIONAL`).
 4. **Persist** — full extraction + exceptions written to Postgres. Source PDF bytes persisted (deferred-load column) so the viewer can re-render the document later.
 5. **Review** — Next.js UI shows PDF on the left, structured extraction on the right. Click any extracted field → PDF jumps to that page and tints the source snippet. Exception queue lives below.
@@ -98,7 +98,7 @@ Why this market first:
 - **Backend:** Python 3.12 + FastAPI + LangGraph on Railway. Procfile-based deploy.
 - **DB:** Neon Postgres via asyncpg (pooler-compatible: `prepared_statement_cache_size=0`).
 - **LLM:** Claude Sonnet 4.6 for extraction (vision-capable), Claude Haiku 4.5 for template detection + grounded Q&A.
-- **PDF:** `pypdf` for text-native, Claude vision for scanned-page fallback (no `poppler` / `pdf2image` dependency).
+- **PDF:** `pypdf` for text extraction, `pypdfium2` for page-image rendering (no system deps — embedded native lib), `ocrmypdf` (+ Tesseract) for scanned PDFs. Page images attached to every extraction call so Claude grounds visual fields (checkboxes, signatures) in pixels rather than OCR output.
 - **MCP:** official Python `mcp` SDK.
 - **Ops:** GitHub Actions cron pings `/health` every 5 min to keep Railway warm; CORS open by default (`CORS_ORIGINS` env var to lock down).
 
@@ -115,6 +115,7 @@ Optional:
 - `EXTRACT_MAX_TOKENS`, `QA_MAX_TOKENS` — token caps per call. `QA_MAX_TOKENS` defaults to 4096 so long answers (e.g. "list all flagged exceptions") fit the JSON envelope without truncating mid-string.
 - `PDF_FETCH_TIMEOUT` — seconds (default 30).
 - `MIN_TEXT_LEN_PER_PAGE` — pages below this much extracted text are flagged for vision fallback (default 50 chars).
+- `PAGE_RENDER_DPI` — DPI for the page-image render attached to each extraction call (default 150). Higher gets diminishing returns on legibility and grows image-token cost ~quadratically.
 - `MAX_UPLOAD_SIZE` — bytes (default 20 MiB).
 - `CORS_ORIGINS` — comma-separated allowed origins (default `*`).
 
