@@ -18,6 +18,7 @@ import base64
 import io
 import json
 import os
+import sys
 from collections.abc import Iterator
 from typing import Any
 from uuid import UUID, uuid4
@@ -116,12 +117,36 @@ def _run_ocrmypdf(pdf_bytes: bytes) -> bytes:
 
 
 async def _maybe_ocr(pdf_bytes: bytes, pages_needing_vision: list[int]) -> bytes:
-    """Run ocrmypdf if text extraction missed pages. No-op when OCR_ENABLED=false."""
-    if not OCR_ENABLED or not pages_needing_vision:
+    """Run ocrmypdf if text extraction missed pages. No-op when OCR_ENABLED=false.
+
+    Failures are logged but swallowed — vision fallback will still pick up
+    the slack in extract. Logged loudly so deploy issues are visible.
+    """
+    if not OCR_ENABLED:
+        print("[ocr] skipped: OCR_ENABLED=false", file=sys.stderr)
         return pdf_bytes
+    if not pages_needing_vision:
+        print("[ocr] skipped: no pages need vision", file=sys.stderr)
+        return pdf_bytes
+    print(
+        f"[ocr] starting on {len(pages_needing_vision)} pages "
+        f"({len(pdf_bytes)} bytes input)",
+        file=sys.stderr,
+    )
     try:
-        return await asyncio.to_thread(_run_ocrmypdf, pdf_bytes)
-    except Exception:  # noqa: BLE001 — OCR is best-effort; never fail ingest on its account
+        result = await asyncio.to_thread(_run_ocrmypdf, pdf_bytes)
+        print(
+            f"[ocr] done — {len(result)} bytes output "
+            f"({'changed' if result is not pdf_bytes else 'unchanged'})",
+            file=sys.stderr,
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001 — best-effort; never fail ingest
+        print(
+            f"[ocr] FAILED ({type(exc).__name__}): {exc} — "
+            f"continuing with original bytes",
+            file=sys.stderr,
+        )
         return pdf_bytes
 
 
