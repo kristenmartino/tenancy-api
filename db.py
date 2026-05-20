@@ -25,7 +25,18 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///tenancy.db")
 _connect_args: dict[str, object] = (
     {"prepared_statement_cache_size": 0} if "+asyncpg" in DATABASE_URL else {}
 )
-engine = create_async_engine(DATABASE_URL, echo=False, connect_args=_connect_args)
+# pool_pre_ping=True: SQLAlchemy issues a tiny SELECT 1 before handing out
+# each pooled connection. Catches connections that Neon/PgBouncer dropped
+# while idle and silently replaces them. Without this, the first request
+# after an idle period intermittently hits a dead connection and returns
+# 500 (visible on Vercel as "Couldn't reach the API"). The roundtrip cost
+# is negligible vs the cost of one flaky 500.
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args=_connect_args,
+    pool_pre_ping=True,
+)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
