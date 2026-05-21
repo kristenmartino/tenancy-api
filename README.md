@@ -118,6 +118,10 @@ Optional:
 - `PAGE_RENDER_DPI` — DPI for the page-image render attached to each extraction call (default 150). Higher gets diminishing returns on legibility and grows image-token cost ~quadratically.
 - `MAX_UPLOAD_SIZE` — bytes (default 20 MiB).
 - `CORS_ORIGINS` — comma-separated allowed origins (default `*`).
+- `TEXTRACT_ENABLED` — opt in to Amazon Textract `AnalyzeDocument` for checkbox / selection-element geometry on `match_type=checkbox` fields. Default off — disabled fields fall back to "navigate to page, no overlay". When enabled, also requires:
+  - `AWS_REGION` — defaults to `us-east-1`. Pick whichever is closest to the Railway deploy region.
+  - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` — or an IAM role on the host. Needs `textract:AnalyzeDocument`.
+  - Pricing: Textract Forms = $0.05 per page as of 2026. A 10-page lease costs ~$0.50 per upload. Fine for demo; would batch via `start_document_analysis` in production.
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate

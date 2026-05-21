@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["app", "bbox", "db", "graph", "mcp_server", "qa", "schemas"]
+py-modules = ["app", "bbox", "db", "graph", "mcp_server", "qa", "schemas", "textract"]
 
 [project]
 name = "tenancy-api"
@@ -27,6 +27,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20",
     "asyncpg>=0.29",
+    "boto3>=1.35",
 ]
 
 [project.optional-dependencies]

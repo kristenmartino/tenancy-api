@@ -556,27 +556,43 @@ def _walk_extracted_fields(obj: Any, path: str = "") -> Iterator[tuple[str, Extr
 
 def _attach_derived_bboxes(extraction: LeaseExtraction, pdf_bytes: bytes) -> None:
     """For every ExtractedField with a source, replace `source.bboxes` with
-    coords derived from the OCR'd PDF's text layer via snippet alignment.
+    coords derived from the OCR'd PDF.
 
-    Mutates the extraction in place. Failures (no match, OCR gaps, page
-    out of range) silently leave `bboxes = []`, which the frontend
-    renders as "navigate to page, no overlay". match_type ∈ {absent,
-    checkbox} is also a no-op here — checkbox geometry will arrive from
-    a Textract follow-up; absent fields have no location to point at.
+    Two derivation paths, dispatched on `match_type`:
+      - `filled` / `blank` / `inferred` → `bbox.derive_bboxes` (snippet
+        aligned against pdfplumber's word positions; one rect per line)
+      - `checkbox` → `textract.derive_checkbox_bbox` (Amazon Textract
+        SELECTION_ELEMENT geometry; returns a single union rect over the
+        checkbox glyph + adjacent label). Opt-in via `TEXTRACT_ENABLED=1`;
+        no-ops when disabled, so the field falls back to "navigate, no
+        overlay" without an AWS bill.
+
+    Mutates in place. All failure modes (no match, OCR gap, AWS error,
+    page out of range) silently leave `bboxes = []`. Per-field failures
+    do not break extraction.
     """
     from bbox import derive_bboxes  # local import to keep startup lean
+    from textract import derive_checkbox_bbox
 
     for _path, field in _walk_extracted_fields(extraction):
         src = field.source
         if src is None or not src.snippet:
             continue
         try:
-            src.bboxes = derive_bboxes(
-                pdf_bytes,
-                src.page_number,
-                src.snippet,
-                src.match_type,
-            )
+            if src.match_type == "checkbox":
+                # Textract returns a single union BoundingBox (checkbox + label).
+                # Wrap in a list to match the `bboxes` array contract.
+                checkbox_bbox = derive_checkbox_bbox(
+                    pdf_bytes, src.page_number, src.snippet,
+                )
+                src.bboxes = [checkbox_bbox] if checkbox_bbox else []
+            else:
+                src.bboxes = derive_bboxes(
+                    pdf_bytes,
+                    src.page_number,
+                    src.snippet,
+                    src.match_type,
+                )
         except Exception as exc:  # noqa: BLE001 — bbox failures must not break extraction
             print(
                 f"[bbox] derivation failed at {_path}: "
