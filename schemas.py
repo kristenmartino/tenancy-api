@@ -10,6 +10,7 @@ review UI / MCP server.
 
 from datetime import date
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -19,16 +20,15 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 class BoundingBox(BaseModel):
-    """Normalized (0.0-1.0) page coordinates of an extracted field's location.
+    """Normalized (0.0-1.0) page coordinates of one rectangular highlight.
 
-    All four values are fractions of the page's width / height — so the same
-    schema works regardless of render resolution. (x, y) is the top-left
-    corner. Origin is the top-left of the page.
+    All four values are fractions of the page's width / height, so the same
+    coords work regardless of render resolution. (x, y) is the top-left
+    corner; origin is the page's top-left.
 
-    Set by Sonnet vision during extraction. Used by the frontend's PDF viewer
-    to draw overlay rectangles at exact pixel coords (computed as
-    bbox.x * canvasWidth, etc.) — replaces text-layer substring matching
-    for click-to-highlight.
+    For multi-line highlights, emit one `BoundingBox` per line — see
+    `SourceSpan.bboxes`. This matches the PDF spec's `/Highlight` annotation
+    QuadPoints model (Adobe, Mendeley render highlights the same way).
     """
     x: float = Field(..., ge=0.0, le=1.0)
     y: float = Field(..., ge=0.0, le=1.0)
@@ -36,18 +36,61 @@ class BoundingBox(BaseModel):
     height: float = Field(..., gt=0.0, le=1.0)
 
 
+SourceMatchType = Literal[
+    "filled",     # value is typed/printed in a writable space
+    "blank",      # there's a labeled placeholder but no value filled in
+    "inferred",   # value is implied by surrounding prose, not a fillable field
+    "checkbox",   # value is decided from a checked/unchecked box
+    "absent",     # document doesn't address this field at all
+]
+
+
 class SourceSpan(BaseModel):
-    """Where in the source PDF this field was extracted from."""
+    """Where in the source PDF this field was extracted from.
+
+    `bboxes` is the load-bearing field — one rect per line, derived
+    server-side by aligning `snippet` against the OCR text layer's
+    per-word coordinates (see `bbox.py`). Empty list means "no overlay,
+    just navigate to the page". `match_type` discriminates how the field
+    was found, which gates which derivation path applies.
+
+    `bbox` (singular, deprecated) is preserved for one schema cycle so
+    in-flight DB rows from the prior single-rect contract still validate.
+    """
     page_number: int = Field(..., ge=1, description="1-indexed page number")
     char_start: int = Field(..., ge=0, description="Character offset on page")
     char_end: int = Field(..., ge=0, description="Character offset on page")
     snippet: str = Field(..., description="Verbatim text supporting the extraction")
+    match_type: SourceMatchType = Field(
+        default="filled",
+        description=(
+            "How the extraction located this field. Drives which bbox "
+            "derivation path runs (snippet-anchored OCR for filled / blank "
+            "/ inferred; LLM-vision for checkbox; null for absent)."
+        ),
+    )
+    section_label: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable section heading the field sits under, e.g. "
+            "'3. Lease Term', 'Utilities and Services'. Cosmetic context "
+            "for the review UI; not used in bbox derivation."
+        ),
+    )
+    bboxes: list[BoundingBox] = Field(
+        default_factory=list,
+        description=(
+            "Per-line highlight rectangles (PDF QuadPoints model). Empty "
+            "list = no overlay. Derived from `snippet` against OCR word "
+            "positions for text fields; from LLM-vision for checkboxes."
+        ),
+    )
     bbox: BoundingBox | None = Field(
         default=None,
         description=(
-            "Normalized page coordinates of the field's source location. "
-            "Optional — older extractions don't have this; falls back to "
-            "text-layer matching in the frontend viewer."
+            "DEPRECATED. Single-rect form of the highlight, kept for one "
+            "schema cycle to validate existing DB rows. New extractions "
+            "populate `bboxes` instead. Remove after a clean re-extract."
         ),
     )
 

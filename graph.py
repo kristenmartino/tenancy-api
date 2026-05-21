@@ -241,22 +241,47 @@ Extract the specified section and return ONLY a JSON object matching the schema.
 Every field must include:
   - value: the extracted value (or null if not present)
   - confidence: 0.0 to 1.0, your honest confidence
-  - source: {page_number, char_start, char_end, snippet, bbox} pointing to the
-            location in the document:
+  - source: {page_number, char_start, char_end, snippet, match_type, section_label}
+            pointing to where in the document this came from:
             * page_number: 1-indexed
-            * char_start/char_end: character offsets on that page
-            * snippet: verbatim text supporting the extraction
-            * bbox: {x, y, width, height} as fractions (0.0-1.0) of the page's
-                    width/height, with (x, y) at the top-left of the rectangle
-                    that visually contains the supporting text. Origin is the
-                    page's top-left. Be as tight as you reasonably can — bound
-                    just the line(s) containing the value, not the whole
-                    paragraph. If the field is null because the document
-                    doesn't say it, set bbox to null too.
+            * char_start/char_end: character offsets in the page's OCR text
+              (your best estimate; downstream code aligns the snippet against
+              the OCR text layer regardless)
+            * snippet: verbatim text supporting the extraction. For typed/
+              printed values: the exact characters as they appear. For blanks:
+              the labeling text immediately around the blank ("day of (month),
+              ___(year)", "$_____ per month"). For checkboxes/enums: the label
+              text adjacent to the box ("electric", "lead paint disclosure").
+              This snippet is what downstream code finds in the PDF text layer
+              to draw the highlight box, so it MUST appear verbatim in the
+              document (modulo OCR noise).
+            * match_type: how this field was located. One of:
+              - "filled": a typed/printed value is visibly present (e.g.
+                "1621 James Ave Waco, TX 76706" written into an address line).
+              - "blank": there's a visible labeled placeholder (underline,
+                empty parens, "$_____", blank line after a colon) but no
+                value is filled in. Snippet should be the label + placeholder.
+              - "inferred": the value is implied by surrounding prose, not a
+                fillable field. Snippet should be the supporting phrase.
+              - "checkbox": the value comes from a checked/unchecked box.
+                Snippet should be the label adjacent to the box. ALWAYS use
+                this match_type for fields decided from visual marks, whether
+                the box was checked or empty — the downstream renderer needs
+                to know this is a visual-only field.
+              - "absent": the document doesn't address this field at all.
+                Set value to null. (snippet may be empty for "absent".)
+            * section_label: the document's printed heading for the section
+              this field sits under, e.g. "3. Lease Term", "Utilities and
+              Services", "Federally Required Lead Hazard Disclosure". Null if
+              there is no clear heading.
   - notes: optional, only if ambiguity needs flagging
 
-Do not hallucinate. If a field is not stated in the document, set value to null and
-confidence to 1.0 (you are confident it is absent). bbox is null in that case.
+Do NOT emit bbox coordinates. Bbox is derived server-side by aligning your
+snippet against the OCR'd PDF's word positions — your job is to tell us what
+text to find, not where to draw the box.
+
+Do not hallucinate. If a field is not stated in the document at all, set value
+to null, confidence to 1.0, match_type to "absent".
 
 Schema for this section:
 {schema}
@@ -496,6 +521,9 @@ async def extract_fields(
         confidences = [f.confidence for _, f in _walk_extracted_fields(extraction)]
         extraction.overall_confidence = sum(confidences) / max(len(confidences), 1)
 
+        if state.pdf_bytes is not None:
+            _attach_derived_bboxes(extraction, state.pdf_bytes)
+
         state.extraction = extraction
         state.status = "extracted"
     except Exception as exc:  # noqa: BLE001 — node boundary: surface failures via state.error
@@ -524,6 +552,38 @@ def _walk_extracted_fields(obj: Any, path: str = "") -> Iterator[tuple[str, Extr
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
             yield from _walk_extracted_fields(item, f"{path}[{i}]")
+
+
+def _attach_derived_bboxes(extraction: LeaseExtraction, pdf_bytes: bytes) -> None:
+    """For every ExtractedField with a source, replace `source.bboxes` with
+    coords derived from the OCR'd PDF's text layer via snippet alignment.
+
+    Mutates the extraction in place. Failures (no match, OCR gaps, page
+    out of range) silently leave `bboxes = []`, which the frontend
+    renders as "navigate to page, no overlay". match_type ∈ {absent,
+    checkbox} is also a no-op here — checkbox geometry will arrive from
+    a Textract follow-up; absent fields have no location to point at.
+    """
+    from bbox import derive_bboxes  # local import to keep startup lean
+
+    for _path, field in _walk_extracted_fields(extraction):
+        src = field.source
+        if src is None or not src.snippet:
+            continue
+        try:
+            src.bboxes = derive_bboxes(
+                pdf_bytes,
+                src.page_number,
+                src.snippet,
+                src.match_type,
+            )
+        except Exception as exc:  # noqa: BLE001 — bbox failures must not break extraction
+            print(
+                f"[bbox] derivation failed at {_path}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            src.bboxes = []
 
 
 def validate_extraction(state: ExtractionState) -> ExtractionState:

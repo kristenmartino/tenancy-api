@@ -98,7 +98,7 @@ Why this market first:
 - **Backend:** Python 3.12 + FastAPI + LangGraph on Railway. Procfile-based deploy.
 - **DB:** Neon Postgres via asyncpg (pooler-compatible: `prepared_statement_cache_size=0`).
 - **LLM:** Claude Sonnet 4.6 for extraction (vision-capable), Claude Haiku 4.5 for template detection + grounded Q&A.
-- **PDF:** `pypdf` for text extraction, `pypdfium2` for page-image rendering (no system deps — embedded native lib), `ocrmypdf` (+ Tesseract) for scanned PDFs. Page images attached to every extraction call so Claude grounds visual fields (checkboxes, signatures) in pixels rather than OCR output.
+- **PDF:** `pypdf` for text extraction, `pypdfium2` for page-image rendering (no system deps — embedded native lib), `ocrmypdf` (+ Tesseract) for scanned PDFs. Page images attached to every extraction call so Claude grounds visual fields (checkboxes, signatures) in pixels rather than OCR output. `pdfplumber` + `rapidfuzz` for the OCR-anchored bbox derivation — Sonnet returns the snippet text per field, the backend aligns that snippet against pdfplumber's word-level positions in the OCR'd PDF and emits one bbox per line (PDF QuadPoints model). LLM never emits coordinates; geometry is owned by the OCR layer.
 - **MCP:** official Python `mcp` SDK.
 - **Ops:** GitHub Actions cron pings `/health` every 5 min to keep Railway warm; CORS open by default (`CORS_ORIGINS` env var to lock down).
 
@@ -141,7 +141,7 @@ High-level groups:
 - **Special clauses** — early termination, military, renewal, sublet
 - **Compliance disclosures** — lead paint, mold, bed bug, etc.
 
-Each field is wrapped in `ExtractedField[T]` which carries `value`, `confidence`, `source: SourceSpan | None`, and `notes`. `SourceSpan` is `{page_number, char_start, char_end, snippet}`.
+Each field is wrapped in `ExtractedField[T]` which carries `value`, `confidence`, `source: SourceSpan | None`, and `notes`. `SourceSpan` is `{page_number, char_start, char_end, snippet, match_type, section_label, bboxes}`. `match_type` discriminates how the field was located (`filled` / `blank` / `inferred` / `checkbox` / `absent`); `bboxes` is a list of `BoundingBox` (normalized 0-1 coords, top-left origin) — one per line, matching the PDF `/Highlight` QuadPoints model. Coordinates are derived server-side from the OCR'd PDF's word positions via `pdfplumber` + `rapidfuzz`, not emitted by the LLM.
 
 ## MCP surface
 
