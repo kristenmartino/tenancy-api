@@ -145,16 +145,25 @@ Each field is wrapped in `ExtractedField[T]` which carries `value`, `confidence`
 
 ## MCP surface
 
+The same agent, accessible from Claude Desktop. Six tools, one auth boundary, all six wrap the same Railway-deployed FastAPI backend that powers the [SaaS UI](https://github.com/kristenmartino/tenancy).
+
+📹 **30s bonus demo:** [`docs/demo-mcp.mp4`](docs/demo-mcp.mp4) — script at [`docs/demo-mcp.md`](docs/demo-mcp.md). Shows a multi-tool resolve flow: *"Pull up lease 45314996 — what's flagged?"* → `list_exceptions` + `get_lease` → *"Edit the term start date to 2018-01-01."* → `resolve_exception`.
+
+![Tenancy MCP tools loaded in Claude Desktop](docs/mcp-tools.png)
+
 | Tool | Purpose |
 |---|---|
-| `list_leases()` | Return processed leases with status and summary |
-| `get_lease(lease_id)` | Full structured extraction |
-| `extract_lease(pdf_url)` | Trigger extraction on a new document |
-| `query_lease(lease_id, question)` | Natural-language Q&A over a single lease |
-| `list_exceptions(lease_id=None)` | Pending human-review items |
+| `list_leases(status=None, limit=50)` | Return processed leases with status and summary |
+| `get_lease(lease_id)` | Full structured extraction with per-field source citations |
+| `extract_lease(pdf_url)` | Trigger extraction on a new document — runs async; poll `get_lease` for results |
+| `query_lease(lease_id, question)` | Natural-language Q&A grounded on the structured extraction, with citations |
+| `list_exceptions(lease_id=None, severity=None, resolved=False)` | Pending human-review items |
 | `resolve_exception(exception_id, action, correction=None)` | Approve / edit / reject — see semantics below |
 
-The Claude Desktop demo: *"Show me all leases expiring in the next 12 months and flag any with early termination clauses."* Claude calls `list_leases` + `get_lease` and reasons over structured fields with source citations.
+Two example prompts:
+
+- *"Show me all leases expiring in the next 12 months and flag any with early termination clauses."* → Claude calls `list_leases` + `get_lease` per match, reasons over structured fields with source citations.
+- *"Pull up lease 45314996 — what's flagged?"* → `list_exceptions` for the review queue + `get_lease` for context. Follow-up: *"Edit the term start date to 2018-01-01."* → `resolve_exception(action="edit", correction={value: "2018-01-01"})`. That's the [bonus demo](docs/demo-mcp.md).
 
 ### Resolve semantics
 
