@@ -223,9 +223,24 @@ class ComplianceDisclosures(BaseModel):
 # Top-level extraction
 # ---------------------------------------------------------------------------
 
+SCHEMA_VERSION = 2
+"""Versioning for the LeaseExtraction shape so future migrations are explicit.
+
+Version history:
+  - 1: `SourceSpan.bbox: BoundingBox | None` (Sonnet-emitted single bbox).
+  - 2: `SourceSpan.bboxes: list[BoundingBox]` (OCR-anchored per-line) +
+       `match_type` + `section_label`. `bbox` kept for one cycle for in-flight
+       DB rows. Current.
+
+Bump on any structural change to LeaseExtraction or its nested models that
+breaks deserialization of older rows. Add the migration note inline here.
+"""
+
+
 class LeaseExtraction(BaseModel):
     """The full structured representation of an extracted lease."""
     lease_id: UUID
+    schema_version: int = Field(default=SCHEMA_VERSION, ge=1)
     template_detected: LeaseTemplate
     parties: list[Party]
     property: Property
