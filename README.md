@@ -94,7 +94,7 @@ Why this market first:
 
 ## Stack
 
-- **Frontend:** Next.js 16 (App Router) + TypeScript + Tailwind 4 on Vercel. `react-pdf` for the viewer, click-to-highlight via PDF.js text layer.
+- **Frontend:** Next.js 16 (App Router) + TypeScript + Tailwind 4 on Vercel. `react-pdf` for canvas rendering; click-to-highlight uses backend-emitted `bboxes` rendered as absolutely-positioned overlays, not PDF.js text-layer matching.
 - **Backend:** Python 3.12 + FastAPI + LangGraph on Railway. Procfile-based deploy.
 - **DB:** Neon Postgres via asyncpg (pooler-compatible: `prepared_statement_cache_size=0`).
 - **LLM:** Claude Sonnet 4.6 for extraction (vision-capable), Claude Haiku 4.5 for template detection + grounded Q&A.
@@ -147,9 +147,9 @@ Each field is wrapped in `ExtractedField[T]` which carries `value`, `confidence`
 
 The same agent, accessible from Claude Desktop. Six tools, one auth boundary, all six wrap the same Railway-deployed FastAPI backend that powers the [SaaS UI](https://github.com/kristenmartino/tenancy).
 
-📹 **30s bonus demo:** [`docs/demo-mcp.mp4`](docs/demo-mcp.mp4) — script at [`docs/demo-mcp.md`](docs/demo-mcp.md). Shows a multi-tool resolve flow: *"Pull up lease 45314996 — what's flagged?"* → `list_exceptions` + `get_lease` → *"Edit the term start date to 2018-01-01."* → `resolve_exception`.
+📹 **30s bonus demo** (script ready, recording forthcoming): [`docs/demo-mcp.md`](docs/demo-mcp.md). Shows a multi-tool resolve flow: *"Pull up lease 45314996 — what's flagged?"* → `list_exceptions` + `get_lease` → *"Edit the term start date to 2018-01-01."* → `resolve_exception`.
 
-![Tenancy MCP tools loaded in Claude Desktop](docs/mcp-tools.png)
+_(A screenshot of the six tools loaded in Claude Desktop will land at `docs/mcp-tools.png` alongside the recording.)_
 
 | Tool | Purpose |
 |---|---|
@@ -213,7 +213,8 @@ Residential is the wedge because the schema, validation rules, and demo are conc
 
 **Real:**
 - End-to-end extraction pipeline on real residential lease templates, deployed and reachable
-- Source-span citation per extracted field; click-to-highlight on the PDF in the UI
+- Source-span citation per extracted field; click-to-highlight on the PDF in the UI (OCR-anchored bbox overlays)
+- Interactive exception resolve UI — approve / edit / reject wired to the resolve endpoint; edit writes the corrected value back into the extraction
 - Seven-rule validation + recursive low-confidence sweep generating `LeaseException` rows
 - MCP server with six working tools, tested against Claude Desktop
 - Review queue listing exceptions with severity gating
@@ -227,7 +228,7 @@ Residential is the wedge because the schema, validation rules, and demo are conc
 - No multi-tenant accounts — demo workspace only
 - Human corrections stored but not yet fed back into extraction prompts (next: closed-loop feedback so the agent observes outcomes and self-improves)
 - Single document type at launch (residential); commercial and student housing on the v2 roadmap
-- Interactive exception resolve in the UI (currently read-only — `resolve_exception` works via MCP / direct API call)
+- Checkbox / signature highlight geometry (OCR-anchored bboxes cover text fields; visual-mark geometry is deferred to an opt-in Textract path, not yet merged or verified)
 - No re-extraction diff view — list + highlight + buttons
 - No state-aware validation rules yet (CA 2x deposit cap is a code constant, not a per-state lookup table)
 - No proper accuracy evals — confidence numbers are self-reported by the model, not measured against a ground-truth corpus. Real evals require accumulating labeled examples from the review queue (closed-loop feedback above).
