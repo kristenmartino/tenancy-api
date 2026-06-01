@@ -1,11 +1,21 @@
 name: Keep services warm
 
-# Hits the Railway API /health endpoint every 5 minutes so the service stays
-# warm. Avoids cold-start latency that was occasionally tripping Vercel's
+# Best-effort warm-up ping for the Railway API. This is NOT uptime monitoring
+# and NOT an uptime guarantee — see docs/demo-readiness.md for the real
+# pre-demo procedure (manual warm + local warm loop).
+#
+# Pings /leases (NOT /health): /leases touches the Neon DB path, so it keeps the
+# connection pool warm and surfaces idle-disconnects, which a static /health
+# cannot. Avoids the cold-start latency that occasionally tripped Vercel's
 # 10-second function timeout on the homepage's server-side fetch.
 #
-# GitHub Actions cron has a minimum 5-minute interval and may be delayed
-# during high load — perfect for a warm-up ping (best-effort by design).
+# Scheduling caveat: GitHub Actions' shortest cron interval is 5 minutes, but
+# scheduled runs are deprioritized — frequently delayed, and dropped entirely
+# during high load. Observed cadence on this repo is ~30 min at best and 1-2 h
+# overnight, so this does NOT keep the service hot at 5-minute granularity. A
+# failure here usually means "a delayed run happened to fire while prod was
+# cold-sleeping," not "prod is down." For hot, predictable demos, warm manually
+# and run a local loop (docs/demo-readiness.md).
 
 on:
   schedule:
@@ -15,16 +25,24 @@ on:
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    # 4 min, not 2: the cold-start-tolerant 40s-per-attempt ping below can run
+    # up to 3x40s + 2x5s sleep = 130s worst case, which would blow a 2-min cap.
+    timeout-minutes: 4
     steps:
       - name: Ping Railway /leases (with retries)
         # /leases exercises the DB connection pool, not just the web process —
         # keeps Neon's pooler warm so the first user request after an idle
         # period doesn't hit a dead connection. /health alone wasn't enough
         # because it doesn't touch the DB.
+        #
+        # --max-time 40 is deliberately cold-start tolerant: a fully slept
+        # Railway service plus scaled-to-zero Neon compute can take 20-30s to
+        # resume, and a delayed scheduled run is exactly when we hit that cold
+        # start. The ping should wait long enough to *warm* the service, not
+        # fail on it. (Was 15s, which is shorter than a cold resume.)
         run: |
           for i in 1 2 3; do
-            if curl -fsS --max-time 15 https://tenancy-api-production.up.railway.app/leases > /dev/null; then
+            if curl -fsS --max-time 40 https://tenancy-api-production.up.railway.app/leases > /dev/null; then
               echo "  warm — attempt $i"
               exit 0
             fi
