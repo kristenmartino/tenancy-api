@@ -100,7 +100,7 @@ Why this market first:
 - **LLM:** Claude Sonnet 4.6 for extraction (vision-capable), Claude Haiku 4.5 for template detection + grounded Q&A.
 - **PDF:** `pypdf` for text extraction, `pypdfium2` for page-image rendering (no system deps — embedded native lib), `ocrmypdf` (+ Tesseract) for scanned PDFs. Page images attached to every extraction call so Claude grounds visual fields (checkboxes, signatures) in pixels rather than OCR output. `pdfplumber` + `rapidfuzz` for the OCR-anchored bbox derivation — Sonnet returns the snippet text per field, the backend aligns that snippet against pdfplumber's word-level positions in the OCR'd PDF and emits one bbox per line (PDF QuadPoints model). LLM never emits coordinates; geometry is owned by the OCR layer.
 - **MCP:** official Python `mcp` SDK.
-- **Ops:** GitHub Actions cron pings `/health` every 5 min to keep Railway warm; CORS open by default (`CORS_ORIGINS` env var to lock down).
+- **Ops:** GitHub Actions cron pings `/leases` to keep Railway warm — `/leases` rather than `/health` because it touches the Neon connection pool, so it also surfaces idle-disconnects a static health check would miss. Scheduled `*/5`, but GitHub deprioritizes short-interval crons, so it effectively fires ~30 min apart (1-2 h overnight); it is best-effort warming, not uptime monitoring. CORS open by default (`CORS_ORIGINS` env var to lock down).
 
 Mirrors the Sift stack intentionally — same two-service shape, same hosting, same DB pattern.
 

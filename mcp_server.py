@@ -22,7 +22,12 @@ from mcp.server.fastmcp import FastMCP
 # Configuration
 # ---------------------------------------------------------------------------
 
-TENANCY_API_BASE = os.getenv("TENANCY_API_BASE", "https://api.tenancy.kristenmartino.ai")
+# Default is the deployed Railway host. `api.tenancy.kristenmartino.ai` was never
+# configured — it does not resolve, and pointing here silently broke every tool
+# for anyone who ran the server without setting TENANCY_API_BASE.
+TENANCY_API_BASE = os.getenv(
+    "TENANCY_API_BASE", "https://tenancy-api-production.up.railway.app"
+)
 TENANCY_API_KEY = os.getenv("TENANCY_API_KEY", "")  # If you add auth later
 
 mcp = FastMCP("tenancy")
