@@ -145,7 +145,7 @@ Each field is wrapped in `ExtractedField[T]` which carries `value`, `confidence`
 
 ## MCP surface
 
-The same agent, accessible from Claude Desktop. Six tools, one auth boundary, all six wrap the same Railway-deployed FastAPI backend that powers the [SaaS UI](https://github.com/kristenmartino/tenancy).
+The same agent, accessible from Claude Desktop. Six tools over one backend — all six wrap the same Railway-deployed FastAPI backend that powers the [SaaS UI](https://github.com/kristenmartino/tenancy). No auth boundary today — multi-tenant accounts and auth are a deferred productization gate (see [STATUS.md](STATUS.md)).
 
 📹 **30s bonus demo** (script ready, recording forthcoming): [`docs/demo-mcp.md`](docs/demo-mcp.md). Shows a multi-tool resolve flow: *"Pull up lease 45314996 — what's flagged?"* → `list_exceptions` + `get_lease` → *"Edit the term start date to 2018-01-01."* → `resolve_exception`.
 
