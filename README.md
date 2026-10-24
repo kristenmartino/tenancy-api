@@ -1,8 +1,8 @@
 # Tenancy
 
-**Citation-backed lease abstraction for multifamily operators.** Ingest a portfolio of residential leases. Get structured fields with per-field source citations and an exception queue gated for human review. Every claim is auditable back to the page and character span in the original PDF.
+**Residential lease extraction and review prototype.** Upload a lease PDF, inspect structured fields and available source references, and resolve flagged exceptions. Source references are optional in the schema; missing or incorrect citations still require checking against the PDF.
 
-Built as a portfolio piece. Demos against the workflow that RealPage, AppFolio, and every multifamily operator runs at portfolio scale: turning lease PDFs into structured data with humans on the edges where extraction can't be trusted blindly.
+Built as a portfolio demonstration of PDF extraction and human review. It has no measured portfolio-scale throughput, labeled accuracy benchmark, or property-management-system integration.
 
 Live at `tenancy.kristenmartino.ai`. API at https://tenancy-api-production.up.railway.app (Railway) backed by Neon Postgres.
 
@@ -16,40 +16,24 @@ curl -X POST https://tenancy-api-production.up.railway.app/leases \
 
 ---
 
-## The wedge
+## Current scope and review boundary
 
-Multifamily operators acquire portfolios of 1K-50K leases on tight close timelines. Manual abstraction is the bottleneck. Incumbent SaaS (RealPage, Yardi) handles bulk processing but the outputs are opaque — when extraction is wrong, there's no breadcrumb back to the source. Disputes default to "trust the system" or "re-abstract by hand."
+- Extracts residential lease fields and asks the model for page, character-span, and snippet references. `ExtractedField.source` may be `None`; a reference is not proof that the value is correct.
+- Reports model-supplied confidence. These scores are not calibrated accuracy estimates, including `1.0` for absent values or human edits.
+- Runs deterministic checks for dates, amounts, required fields, and low confidence. The deposit check is a fixed heuristic, not a state-law compliance engine.
+- **Persists extraction and exceptions before human review.** `ready_to_proceed` reflects extraction status and blocking-exception resolution. It does not gate initial database writes or export to an external system.
+- Provides text highlighting where source matching yields coordinates. Visual-mark geometry and extraction accuracy evaluation remain incomplete.
 
-This system inverts that:
-
-- **Every extracted field carries a source citation** (page + character span + verbatim snippet)
-- **Confidence is per-field** and the model is prompted to honestly report `confidence: 1.0, value: null` when something isn't in the document
-- **Validation rules** (date math, rent positivity, deposit caps by state, required-field presence) flag inconsistencies into an exception queue
-- **Nothing reaches the system of record** until a human approves, edits, or rejects each flagged item
-- **Click any extracted field in the UI** → the PDF jumps to the source page and highlights the snippet
-
-The architecture — agent + cited extraction + rule-based validation + gated exception queue + audit trail — is the portable thing. Residential PMs are the demo. Adjacent verticals below.
-
-## Demo target: residential PM (multifamily / SFR)
-
-Why this market first:
-
-| | |
-|---|---|
-| **Schema fit** | TAA (Texas Apartment Association) is the anchor template, generalized to NAA, CA, FL variants. Schema in `schemas.py`. |
-| **State compliance** | TX has no statutory deposit cap; CA caps at 2x; NY rent stabilization; FL deposit-return timelines. Validation rules can be state-aware. |
-| **Buyer pain** | Portfolio acquisitions = abstract 5-50K leases on a tight close. Existing SaaS is opaque; manual review is the rate-limiter. |
-| **Integration target** | Yardi, RealPage, AppFolio, Entrata. PMS-of-record is the sync target. |
-| **Visible audit trail** | Disputes (security deposit returns, late fees) end up in court more often than people think. "Show me where" matters. |
+The demo uses residential lease templates. Operator demand, acquisition volumes, competitor capabilities, and savings have not been established by this repository. Yardi, RealPage, AppFolio, and Entrata are possible integration targets, not implemented connectors.
 
 ## What it does
 
 1. **Ingest** — accepts a residential lease PDF (TAA, NAA, or state template) via URL or direct upload. Pulls text with pypdf. Flags low-text pages for vision fallback.
-2. **Extract** — LangGraph agent calls Claude Sonnet 4.6 across nine sections in parallel (parties, property, term, rent, deposits, utilities, pets, special clauses, compliance). Each call attaches every page rendered as a PNG (via `pypdfium2`, ~150 DPI) alongside the OCR'd text — the model grounds visual fields (checkboxes, signatures, X marks, hand-fill) in pixels and uses OCR for character-exact dense text (parties, addresses, dollar amounts). This avoids the OCR-noise → false-positive-checkbox class of bug, where Tesseract reads a scan artifact as a stray mark. Every field carries `value`, `confidence`, and a source span. Claude Haiku 4.5 runs in parallel to classify the lease against the template enum.
+2. **Extract** — LangGraph agent calls Claude Sonnet 4.6 across nine sections in parallel (parties, property, term, rent, deposits, utilities, pets, special clauses, compliance). Each call attaches every page rendered as a PNG (via `pypdfium2`, ~150 DPI) alongside the OCR'd text — the model grounds visual fields (checkboxes, signatures, X marks, hand-fill) in pixels and uses OCR for character-exact dense text (parties, addresses, dollar amounts). Page images give the model visual context, but do not eliminate OCR or checkbox errors. Fields carry `value`, model-reported `confidence`, and an optional source span. Claude Haiku 4.5 runs in parallel to classify the lease against the template enum.
 3. **Validate** — seven deterministic rules (date consistency, rent math, deposit-cap heuristic, late-fee/grace-period pairing, lead-paint disclosure presence, required-but-null check, and a recursive low-confidence sweep) emit `LeaseException` rows with severity (`BLOCKING`, `WARNING`, `INFORMATIONAL`).
 4. **Persist** — full extraction + exceptions written to Postgres. Source PDF bytes persisted (deferred-load column) so the viewer can re-render the document later.
-5. **Review** — Next.js UI shows PDF on the left, structured extraction on the right. Click any extracted field → PDF jumps to that page and tints the source snippet. Exception queue lives below.
-6. **Q&A** — `POST /leases/{id}/query` runs grounded Q&A via Claude Haiku 4.5 over the structured extraction; every answer carries field-path citations.
+5. **Review** — Next.js UI shows PDF on the left, structured extraction on the right. Fields with usable source references can navigate to the source page; text highlights require resolved bounding boxes. Checkbox/signature geometry is deferred. Exception queue lives below.
+6. **Q&A** — `POST /leases/{id}/query` runs grounded Q&A via Claude Haiku 4.5 over the structured extraction; the prompt requests field-path citations. Responses can contain an empty citation list, and citation entailment is not independently verified.
 7. **MCP** — six-tool MCP server lets Claude Desktop query the corpus, trigger new extractions, and resolve exceptions interactively.
 
 ## Architecture
@@ -128,7 +112,7 @@ uvicorn app:app --reload
 
 ## The schema
 
-Residential leases anchor on the Texas Apartment Association (TAA) template. The extraction schema generalizes across TAA, NAA, California, and Florida variants. See `schemas.py` for the full Pydantic models.
+Residential leases anchor on the Texas Apartment Association (TAA) template. The schema includes fields intended for TAA, NAA, California, and Florida variants; coverage and accuracy across those templates have not been benchmarked. See `schemas.py` for the full Pydantic models.
 
 High-level groups:
 - **Parties** — tenants, co-signers, landlord entity, property manager
@@ -154,9 +138,9 @@ _(A screenshot of the six tools loaded in Claude Desktop will land at `docs/mcp-
 | Tool | Purpose |
 |---|---|
 | `list_leases(status=None, limit=50)` | Return processed leases with status and summary |
-| `get_lease(lease_id)` | Full structured extraction with per-field source citations |
+| `get_lease(lease_id)` | Full structured extraction with available per-field source references |
 | `extract_lease(pdf_url)` | Trigger extraction on a new document — runs async; poll `get_lease` for results |
-| `query_lease(lease_id, question)` | Natural-language Q&A grounded on the structured extraction, with citations |
+| `query_lease(lease_id, question)` | Natural-language Q&A over the extraction, with model-supplied citations when available |
 | `list_exceptions(lease_id=None, severity=None, resolved=False)` | Pending human-review items |
 | `resolve_exception(exception_id, action, correction=None)` | Approve / edit / reject — see semantics below |
 
@@ -169,7 +153,7 @@ Two example prompts:
 
 `POST /exceptions/{id}/resolve` accepts `{action, correction?}` where `action ∈ {approve, edit, reject}` and `correction` is `{value, note?}` (required when `action == "edit"`).
 
-- **edit** — `lease.extraction` is rewritten at the exception's `field_path`: the leaf `ExtractedField.value` is replaced with `correction.value` and `confidence` is bumped to `1.0` (a human said so). The blocker clears and the lease becomes ready.
+- **edit** — `lease.extraction` is rewritten at the exception's `field_path`: the leaf `ExtractedField.value` is replaced with `correction.value` and `confidence` is set to `1.0` by convention for a human correction, not as a measured probability. The blocker clears; readiness still depends on all other blocking exceptions.
 - **approve** — accept the current state as-is (possibly blank). The exception clears; the blocker clears. *"I accept the gap."*
 - **reject** — exception row closes for audit, but the blocking flag stays material. The lease does **not** become ready. *"I won't bless this field."*
 
@@ -195,33 +179,23 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 Restart Claude Desktop. The six tools above show up under the MCP server icon.
 
-## Market expansion
+## Possible extensions
 
-The architecture — agent + cited extraction + validation rules + exception queue + audit trail — is reusable. Each adjacent vertical needs its own schema, integrations, and (sometimes) hosting story. Sketched honestly:
-
-| Vertical | What changes | Why the architecture fits |
-|---|---|---|
-| **Corporate real estate** (F500 tenants leasing offices, warehouses, datacenters) | Commercial lease schema (TI allowances, escalation, renewal options, percentage rent, exclusive-use). Integration with LeaseAccelerator / Visual Lease / CoStar. ASC 842 / IFRS 16 compliance flags. | Most regulatory exposure of any segment; citations matter more, not less. Largest TAM after multifamily. Obvious v2. |
-| **Government / public housing** | HUD lease forms (50059, voucher programs). FedRAMP/FISMA. Self-hosted deploy via `ocrmypdf` instead of vision API. | Hard procurement requirements rule out most SaaS. Self-hosting + citation trail fits the compliance shape. Long sales cycle (9-18 mo). |
-| **Healthcare REITs** | Ground leases + medical office buildings. OIG anti-kickback flags. HIPAA-aligned audit trail. | Lease terms intersect with regulated provider conduct; "show me where" matters for OIG audits. |
-| **Litigation / e-discovery** | Privilege detection, Bates numbering, Relativity integration. | Same architecture, different domain rules. The exception queue becomes the privilege review queue. |
-| **EU operators** (any of the above, post-GDPR) | Data residency, DSR support. Schema unchanged. | Hosting model becomes a feature (EU region pinning, on-prem option). |
-
-Residential is the wedge because the schema, validation rules, and demo are concrete and the buyer pain is universal at scale. CRE is the natural second vertical — most regulatory exposure and largest TAM after multifamily. The others each require real product work on top of the shared architecture, but the bones are right.
+Commercial leases and other document types would need separate schemas, labeled evaluations, domain review, and integrations. These are unvalidated ideas. This prototype does not establish regulatory compliance, suitability for regulated workflows, market size, or customer demand.
 
 ## What's real vs scaffolded
 
 **Real:**
 - End-to-end extraction pipeline on real residential lease templates, deployed and reachable
-- Source-span citation per extracted field; click-to-highlight on the PDF in the UI (OCR-anchored bbox overlays)
+- Optional source spans and OCR-anchored text highlights when matching succeeds
 - Interactive exception resolve UI — approve / edit / reject wired to the resolve endpoint; edit writes the corrected value back into the extraction
 - Seven-rule validation + recursive low-confidence sweep generating `LeaseException` rows
 - MCP server with six working tools, tested against Claude Desktop
 - Review queue listing exceptions with severity gating
 - Direct PDF upload (`POST /leases/upload`) alongside URL ingest
-- Grounded Q&A endpoint with field-path citations
+- Q&A endpoint prompted to cite extraction field paths; no independent citation verifier
 - Postgres persistence (Neon) with PDF blob storage (deferred-loaded so list queries stay fast)
-- Background-task safety net so no lease ever strands at `pending` on a pipeline crash
+- Background-task error handling marks caught pipeline failures; process termination can still interrupt in-process work
 - GitHub Actions keep-warm cron
 
 **Scaffolded (v2 candidates):**
@@ -230,28 +204,12 @@ Residential is the wedge because the schema, validation rules, and demo are conc
 - Single document type at launch (residential); commercial and student housing on the v2 roadmap
 - Checkbox / signature highlight geometry (OCR-anchored bboxes cover text fields; visual-mark geometry is deferred to an opt-in Textract path, not yet merged or verified)
 - No re-extraction diff view — list + highlight + buttons
-- No state-aware validation rules yet (CA 2x deposit cap is a code constant, not a per-state lookup table)
+- No state-aware legal validation: the deposit rule uses a fixed 2× rent heuristic, not current jurisdiction-specific law
 - No proper accuracy evals — confidence numbers are self-reported by the model, not measured against a ground-truth corpus. Real evals require accumulating labeled examples from the review queue (closed-loop feedback above).
 
-## 48-hour build plan
+## Delivery notes
 
-**Day 1 — backend + agent (16h)**
-- 0-2: Repos, Vercel + Railway deploys, Neon DB, env wiring
-- 2-4: Pull 8-10 sample lease templates (TAA + state variants)
-- 4-7: PDF ingestion — text extraction, vision fallback via native Claude PDF blocks
-- 7-12: LangGraph extraction graph — sectioned structured output, citation tracking, DB writes
-- 12-14: Validation node + exception generation
-- 14-16: End-to-end run, fix worst failures
-
-**Day 2 — UI + MCP + ship (16h)**
-- 16-19: Next.js upload + PDF viewer + extraction panel
-- 19-22: Review queue UI with source-span click-to-highlight
-- 22-26: MCP server, six tools, Claude Desktop integration tested
-- 26-28: Case study page on `kristenmartino.ai`
-- 28-30: Record 60-90s demo video
-- 30-32: Send DM to Harish
-
-16h buffer absorbed into UI polish, deploy hardening (CORS, deferred columns, keep-warm cron), and MCP integration.
+The original build plan was an estimate, not an execution log or evidence of a completed demo recording. Current implementation limits are listed above; recording scripts are linked in the MCP section.
 
 ## Repos
 
